@@ -83,12 +83,23 @@ jobs:
           which gcc
           gcc -dumpmachine
           gcc -v 2>&1 | grep -E "Thread model|gcc version" | head -2
-          # UCRT 工具链会定义 _UCRT；MSVCRT 不会。这里硬性把关，免得后面收一堆看不懂的链接错误。
-          if ! gcc -dM -E -x c /dev/null | grep -q "_UCRT"; then
-            echo "::error::当前 gcc 不是 UCRT 目标（详见脚本注释）；duckdb 预编译库要求 UCRT64"
-            exit 1
-          fi
-          echo "UCRT toolchain ready"
+
+          # 把关「用的是 UCRT64 这一套」：看解析到的 gcc 落在 ucrt64 目录下、
+          # 目标三元组是 x86_64-w64-mingw32、线程模型是 posix（duckdb 预编译库要求）。
+          # 不用 `gcc -dM -E -x c /dev/null`：Git Bash 的 /dev/null 传给 ucrt64 gcc
+          # 会被当成不存在的 Windows 路径，输出为空 —— 上一版就是这么误判的。
+          gcc_path="$(command -v gcc)"
+          echo "gcc resolves to: $gcc_path"
+          case "$gcc_path" in
+            *ucrt64*) ;;
+            *) echo "::error::gcc 不在 ucrt64 目录下（$gcc_path）；duckdb 预编译库要求 UCRT64"; exit 1 ;;
+          esac
+          machine="$(gcc -dumpmachine)"
+          [[ "$machine" == "x86_64-w64-mingw32" ]] || {
+            echo "::error::gcc 目标三元组是 '$machine'，期望 x86_64-w64-mingw32"; exit 1; }
+          gcc -v 2>&1 | grep -q "Thread model: posix" || {
+            echo "::error::gcc 不是 posix 线程模型（duckdb 预编译库需要 winpthreads）"; exit 1; }
+          echo "UCRT64 toolchain ready"
 
       - name: Install Wails CLI
         shell: bash
