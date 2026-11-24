@@ -147,14 +147,30 @@ if [[ "${GOOS_TARGET}" == windows ]]; then
   # sqlite-vec 的 cgo 包装 #include "sqlite3.h"，macOS 能从 SDK 里找到，
   # MinGW 的 sysroot 没有。mattn/go-sqlite3 把同一份 amalgamation 头文件
   # 存成 sqlite3-binding.h，这里生成一个只做转发的 sqlite3.h 垫片。
+  # 三种方式依次尝试：go list（模块已在缓存）→ go mod download 后再 list →
+  # 直接扫 GOMODCACHE（CI 上偶发 go list 在模块尚未下载时直接失败）。
   mattn_dir="$(go list -m -f '{{.Dir}}' github.com/mattn/go-sqlite3 2>/dev/null || true)"
-  if [[ -n "${mattn_dir}" ]]; then
+  if [[ ! -d "${mattn_dir}" ]]; then
+    echo "→ 定位 mattn/go-sqlite3 头文件：go list 未命中，先 go mod download"
+    go mod download github.com/mattn/go-sqlite3 >/dev/null 2>&1 || true
+    mattn_dir="$(go list -m -f '{{.Dir}}' github.com/mattn/go-sqlite3 2>/dev/null || true)"
+  fi
+  if [[ ! -d "${mattn_dir}" ]]; then
+    modcache="$(go env GOMODCACHE 2>/dev/null || true)"
+    if [[ -n "${modcache}" ]]; then
+      mattn_dir="$(ls -d "${modcache}"/github.com/mattn/go-sqlite3@* 2>/dev/null | head -1)"
+    fi
+  fi
+  if [[ -n "${mattn_dir}" && -d "${mattn_dir}" ]]; then
     shim_dir="${TOOLS_ROOT}/cgo-include"
     mkdir -p "${shim_dir}"
     printf '#include "sqlite3-binding.h"\n' > "${shim_dir}/sqlite3.h"
     export CGO_CFLAGS="${CGO_CFLAGS:-} -I${shim_dir} -I${mattn_dir}"
+    echo "  sqlite3 垫片：${shim_dir}/sqlite3.h（mattn 头文件在 ${mattn_dir}）"
   else
-    echo "✗ 无法定位 github.com/mattn/go-sqlite3（go list 失败），Windows 交叉编译需要它提供 sqlite3 头文件" >&2
+    echo "✗ 无法定位 github.com/mattn/go-sqlite3（需要它提供 sqlite3-binding.h）" >&2
+    echo "  go list 结果：'${mattn_dir}'；GOMODCACHE=$(go env GOMODCACHE 2>/dev/null)" >&2
+    echo "  排查：go list -m -f '{{.Dir}}' github.com/mattn/go-sqlite3" >&2
     exit 1
   fi
   if ! command -v makensis >/dev/null 2>&1; then
