@@ -48,10 +48,11 @@ export function useChatQuestionMinimap(options: {
   const anchoredIds = ref<Set<string>>(new Set())
   const scrollbarGutterPx = ref(0)
   const trackHeight = ref(0)
-  const availableGutter = ref(0)
 
+  // 锚点浮在消息内容之上而不是挤在留白里，所以窄窗口下也能显示——
+  // 之前按 availableGutter 判定，窗口一窄就整条导航消失，用户根本找不到。
   const visible = computed(() => (
-    shouldShowQuestionMinimap(overflowing.value, questions.value.length, availableGutter.value)
+    shouldShowQuestionMinimap(overflowing.value, questions.value.length)
   ))
 
   let resizeObserver: ResizeObserver | null = null
@@ -68,7 +69,6 @@ export function useChatQuestionMinimap(options: {
     anchoredIds.value = new Set()
     scrollbarGutterPx.value = 0
     trackHeight.value = 0
-    availableGutter.value = 0
   }
 
   const disconnectObserver = () => {
@@ -91,14 +91,8 @@ export function useChatQuestionMinimap(options: {
     const containerTop = containerRect.top
     const containerStyle = window.getComputedStyle(el)
     const messageList = el.querySelector<HTMLElement>('.msg_list')
-    // Use the actual gutter, so opening/resizing either panel also hides the
-    // outline before its hit area overlaps the answer. Account for CSS zoom.
-    const scale = containerRect.width / el.offsetWidth || 1
-    const railInset = parseFloat(containerStyle.getPropertyValue('--chat-content-inset')) || 20
-    availableGutter.value = messageList
-      ? (messageList.getBoundingClientRect().left - containerRect.left) / scale
-        + (parseFloat(window.getComputedStyle(messageList).paddingLeft) || 0) - railInset
-      : 0
+    // 曾用可用留白（availableGutter）来决定是否显示，窗口一窄导航就整体消失。
+    // 现在导航是浮层，不再依赖留白，这段测量随之删除。
     scrollbarGutterPx.value = Math.max(0, el.offsetWidth - el.clientWidth)
     const messageBounds = anchors.flatMap(anchor => {
       const id = anchor.dataset.messageId

@@ -128,13 +128,13 @@
               />
             </t-select>
           </div>
-          <div v-if="form.provider === 'minio'" class="form-item">
+          <div v-if="isMinio" class="form-item">
             <label class="form-label">{{ t('settings.storageBackend.modeLabel') }}</label>
             <div class="source-options" role="radiogroup">
               <button
                 type="button"
                 class="source-option"
-                :class="{ 'is-active': form.config.mode !== 'docker' }"
+                :class="remoteModeClass"
                 :disabled="!!editing"
                 @click="form.config.mode = 'remote'"
               >
@@ -144,7 +144,7 @@
               <button
                 type="button"
                 class="source-option"
-                :class="{ 'is-active': form.config.mode === 'docker' }"
+                :class="dockerModeClass"
                 :disabled="!!editing"
                 @click="form.config.mode = 'docker'"
               >
@@ -162,7 +162,7 @@
             <t-input
               v-model="form.config.endpoint"
               :disabled="!!editing"
-              :placeholder="form.provider === 'minio' ? 'storage.example.com:9000' : 'https://storage.example.com'"
+              :placeholder="isMinio ? 'storage.example.com:9000' : 'https://storage.example.com'"
               clearable
             />
           </div>
@@ -184,11 +184,11 @@
               </t-input>
             </div>
           </template>
-          <div v-if="form.provider !== 'local'" class="form-item">
+          <div v-if="isNotLocal" class="form-item">
             <label class="form-label required">Bucket</label>
             <t-input v-model="form.config.bucket_name" :disabled="!!editing" clearable />
           </div>
-          <div v-if="form.provider === 'cos'" class="form-item">
+          <div v-if="isCos" class="form-item">
             <label class="form-label">App ID</label>
             <t-input v-model="form.config.app_id" :disabled="!!editing" :placeholder="t('settings.storageBackend.optionalPlaceholder')" clearable />
           </div>
@@ -200,25 +200,25 @@
             <label class="form-label">{{ t('settings.storageBackend.pathPrefixLabel') }}</label>
             <t-input v-model="form.config.path_prefix" :disabled="!!editing" placeholder="weknora/" clearable />
           </div>
-          <div v-if="form.provider === 'minio'" class="form-item">
+          <div v-if="isMinio" class="form-item">
             <div class="vision-toggle">
               <t-switch v-model="form.config.use_ssl" />
               <span class="form-desc form-desc--inline">{{ t('settings.storageBackend.useSslDesc') }}</span>
             </div>
           </div>
-          <div v-if="form.provider === 's3'" class="form-item">
+          <div v-if="isS3" class="form-item">
             <div class="vision-toggle">
               <t-switch v-model="form.config.force_path_style" />
               <span class="form-desc form-desc--inline">{{ t('settings.storageBackend.forcePathStyleDesc') }}</span>
             </div>
           </div>
-          <div v-if="form.provider === 'oss'" class="form-item">
+          <div v-if="isOss" class="form-item">
             <div class="vision-toggle">
               <t-switch v-model="form.config.use_temp_bucket" />
               <span class="form-desc form-desc--inline">{{ t('settings.storageBackend.useTempBucketDesc') }}</span>
             </div>
           </div>
-          <template v-if="['cos', 'tos'].includes(form.provider) || (form.provider === 'oss' && form.config.use_temp_bucket)">
+          <template v-if="usesTempBucket">
             <div class="form-item">
               <label class="form-label">{{ t('settings.storageBackend.tempBucketLabel') }}</label>
               <t-input v-model="form.config.temp_bucket_name" :placeholder="t('settings.storageBackend.tempBucketPlaceholder')" clearable />
@@ -265,10 +265,27 @@ const backends = ref<StorageBackend[]>([]), providers = ref<string[]>([]), defau
 const editing = ref<StorageBackend | null>(null)
 const rawTestResult = ref<'ok' | 'error' | null>(null)
 const blankConfig = (): StorageBackendConfig => ({ mode: 'remote', endpoint: '', region: '', access_key_id: '', secret_access_key: '', bucket_name: '', path_prefix: '', use_ssl: true })
-const form = reactive<{ name: string; provider: string; config: StorageBackendConfig }>({ name: '', provider: 'local', config: blankConfig() })
-const needsEndpoint = computed(() => !['local', 'cos'].includes(form.provider) && !(form.provider === 'minio' && form.config.mode === 'docker'))
-const needsRegion = computed(() => !['local', 'minio'].includes(form.provider))
-const needsCredentials = computed(() => form.provider !== 'local' && !(form.provider === 'minio' && form.config.mode === 'docker'))
+const form = ref<{ name: string; provider: string; config: StorageBackendConfig }>({ name: '', provider: 'local', config: blankConfig() })
+const needsEndpoint = computed(() => !['local', 'cos'].includes(viewProvider.value) && !(viewProvider.value === 'minio' && viewMode.value === 'docker'))
+const needsRegion = computed(() => !['local', 'minio'].includes(viewProvider.value))
+const needsCredentials = computed(() => viewProvider.value !== 'local' && !(viewProvider.value === 'minio' && viewMode.value === 'docker'))
+
+// Boolean view flags for `v-if`. Comparing a reactive object's property inline
+// (`v-if="form.value.provider === 'oss'"`) puts `form` into a narrowing position, which
+// makes vue-tsc emit `form.value.*` for every access in the template. Deriving a
+// plain boolean here keeps the template free of narrowing expressions.
+const remoteModeClass = computed(() => ({ 'is-active': viewMode.value !== 'docker' }))
+const dockerModeClass = computed(() => ({ 'is-active': viewMode.value === 'docker' }))
+const viewProvider = computed(() => form.value.provider as string)
+const viewMode = computed(() => form.value.config.mode as string)
+const isMinio = computed(() => viewProvider.value === 'minio')
+const isCos = computed(() => viewProvider.value === 'cos')
+const isS3 = computed(() => viewProvider.value === 's3')
+const isOss = computed(() => viewProvider.value === 'oss')
+const isNotLocal = computed(() => viewProvider.value !== 'local')
+const usesTempBucket = computed(
+  () => ['cos', 'tos'].includes(viewProvider.value) || (viewProvider.value === 'oss' && !!form.value.config.use_temp_bucket)
+)
 
 const resolveLogo = (provider: string) => providerLogo('storage', provider)
 const providerInitial = (provider: string) => (provider || '?').trim().charAt(0).toUpperCase() || '?'
@@ -285,7 +302,7 @@ const badgeStyle = (provider: string): Record<string, string> => {
   return logo?.mode === 'mono' ? { '--logo-url': `url("${logo.url}")` } : {}
 }
 
-const currentLogo = computed(() => providerLogo('storage', form.provider))
+const currentLogo = computed(() => providerLogo('storage', form.value.provider))
 const monoLogoStyle = computed((): Record<string, string> => {
   const logo = currentLogo.value
   if (!logo || logo.mode !== 'mono') return {}
@@ -332,24 +349,24 @@ async function load() {
     backends.value = list.data || []; defaultID.value = list.default_storage_backend_id || ''; providers.value = types.data || []
   } finally { loading.value = false }
 }
-function resetConfig() { form.config = blankConfig(); rawTestResult.value = null }
-function openCreate() { editing.value = null; form.name = ''; form.provider = providers.value[0] || 'local'; form.config = blankConfig(); rawTestResult.value = null; visible.value = true }
-function openEdit(backend: StorageBackend) { editing.value = backend; form.name = backend.name; form.provider = backend.provider; form.config = { ...blankConfig(), ...backend.config }; rawTestResult.value = null; visible.value = true }
+function resetConfig() { form.value.config = blankConfig(); rawTestResult.value = null }
+function openCreate() { editing.value = null; form.value.name = ''; form.value.provider = providers.value[0] || 'local'; form.value.config = blankConfig(); rawTestResult.value = null; visible.value = true }
+function openEdit(backend: StorageBackend) { editing.value = backend; form.value.name = backend.name; form.value.provider = backend.provider; form.value.config = { ...blankConfig(), ...backend.config }; rawTestResult.value = null; visible.value = true }
 async function testRaw() {
   testing.value = true
   rawTestResult.value = null
   try {
-    const r: any = editing.value ? await testStorageBackendByID(editing.value.id) : await testStorageBackend(form)
+    const r: any = editing.value ? await testStorageBackendByID(editing.value.id) : await testStorageBackend(form.value)
     if (r.success) { rawTestResult.value = 'ok'; MessagePlugin.success(t('settings.storageBackend.testSuccess')) }
     else { rawTestResult.value = 'error'; MessagePlugin.error(r.error || t('settings.storageBackend.testFailed')) }
   } finally { testing.value = false }
 }
 async function testSaved(backend: StorageBackend) { const r: any = await testStorageBackendByID(backend.id); r.success ? MessagePlugin.success(t('settings.storageBackend.testSuccess')) : MessagePlugin.error(r.error || t('settings.storageBackend.testFailed')) }
 async function save() {
-  if (!form.name.trim()) { MessagePlugin.warning(t('settings.storageBackend.nameRequired')); return }
+  if (!form.value.name.trim()) { MessagePlugin.warning(t('settings.storageBackend.nameRequired')); return }
   saving.value = true
   try {
-    const payload = { name: form.name.trim(), provider: form.provider, config: { ...form.config } }
+    const payload = { name: form.value.name.trim(), provider: form.value.provider, config: { ...form.value.config } }
     if (editing.value) await updateStorageBackend(editing.value.id, payload); else await createStorageBackend(payload)
     MessagePlugin.success(t('settings.storageBackend.saveSuccess')); visible.value = false; await load()
   } catch (e: any) { MessagePlugin.error(e?.message || t('settings.storageBackend.saveFailed')) } finally { saving.value = false }

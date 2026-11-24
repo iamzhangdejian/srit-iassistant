@@ -25,13 +25,18 @@ case "$target" in
   x86_64-apple-darwin) lib_dir=darwin_amd64 ;;
   aarch64-apple-darwin) lib_dir=darwin_arm64 ;;
   x86_64-pc-windows-msvc) lib_dir=windows_amd64 ;;
+  # The Go side links with `-L${SRCDIR}/lib/windows_amd64 -lanydoc_go`, and the
+  # Windows desktop bundle is cross-built from macOS with a MinGW toolchain
+  # (see scripts/oem-build-lite.sh), so the GNU triple is the one that ships.
+  # It produces a .a archive, unlike the MSVC triple's .lib.
+  x86_64-pc-windows-gnu) lib_dir=windows_amd64 ;;
   x86_64-unknown-linux-gnu) lib_dir=linux_amd64_gnu ;;
   aarch64-unknown-linux-gnu) lib_dir=linux_arm64_gnu ;;
   x86_64-unknown-linux-musl) lib_dir=linux_amd64_musl ;;
   aarch64-unknown-linux-musl) lib_dir=linux_arm64_musl ;;
   *)
     echo "error: unsupported target '$target'." >&2
-    echo "Supported: {x86_64,aarch64}-{apple-darwin,unknown-linux-{gnu,musl}}, x86_64-pc-windows-msvc" >&2
+    echo "Supported: {x86_64,aarch64}-{apple-darwin,unknown-linux-{gnu,musl}}, x86_64-pc-windows-{msvc,gnu}" >&2
     exit 1
     ;;
 esac
@@ -128,6 +133,37 @@ fi
 echo "Building anydoc $anydoc_version archive for $target"
 prepare_patched_anydoc
 
+# A windows-gnu target needs an explicit linker: rustc does not know that
+# x86_64-w64-mingw32-gcc is the MinGW driver, and the Go side cross-compiles
+# with the very same toolchain, so both halves must agree on it.
+if [[ "$target" == *windows-gnu ]]; then
+  # Two hosts build this archive:
+  #   - Windows native (MSYS2 UCRT64): the driver is plain `gcc`, there is no
+  #     x86_64-w64-mingw32-gcc name, and the toolchain must be UCRT because
+  #     duckdb's prebuilt static libs are (see scripts/oem-build-lite.sh).
+  #   - macOS/Linux cross-build: the driver carries the target triple prefix.
+  # So resolve the driver from $CC first, then from the two conventional names.
+  mingw_cc="${CC:-}"
+  if [[ -z "$mingw_cc" ]]; then
+    if command -v x86_64-w64-mingw32-gcc >/dev/null 2>&1; then
+      mingw_cc=x86_64-w64-mingw32-gcc
+    elif command -v gcc >/dev/null 2>&1; then
+      mingw_cc=gcc
+    fi
+  fi
+  if [[ -z "$mingw_cc" ]] || ! command -v "$mingw_cc" >/dev/null 2>&1; then
+    echo "error: no MinGW-w64 gcc found. Install one (brew install mingw-w64 on macOS," >&2
+    echo "       pacman -S mingw-w64-ucrt-x86_64-gcc in MSYS2 UCRT64 on Windows) or set CC." >&2
+    exit 1
+  fi
+  if ! rustup target list --installed 2>/dev/null | grep -qx "$target"; then
+    echo "error: Rust target '$target' is not installed. Run: rustup target add $target" >&2
+    exit 1
+  fi
+  export CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER="$mingw_cc"
+  echo "Using MinGW linker: $mingw_cc"
+fi
+
 # --locked: build exactly the dependency versions in the committed Cargo.lock.
 # That lockfile is what pins the patched pdf-inspector/lopdf, so a silent
 # resolver drift must fail the build rather than ship an unaudited tree.
@@ -139,3 +175,6 @@ cp "$crate_dir/target/$target/release/$lib_name" "$dest/$lib_name"
 
 echo "Wrote $dest/$lib_name"
 echo "Build WeKnora with the archive: go build -tags anydoc ./cmd/server"
+if [[ "$target" == *windows-gnu ]]; then
+  echo "Cross-build the desktop app with: TARGET=windows/amd64 bash scripts/oem-build-lite.sh"
+fi

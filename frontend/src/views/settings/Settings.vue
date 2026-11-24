@@ -1,6 +1,12 @@
 <template>
+  <!--
+    OEM 改造：设置页由「居中模态」改为「右侧抽屉」。
+    只替换容器形态（variant），内部的分区导航、权限判断（canSeeSection /
+    SETTINGS_SECTION_MIN_ROLE）、路由同步（syncSettingsRoute）全部原样保留。
+    抽屉从侧栏右缘开始，左侧导航列表保持可见可点。
+  -->
   <SettingsModalShell :visible="visible" :title="$t('general.settings')" overlay-class="all-settings-overlay"
-    @close="modalShell.requestClose">
+    variant="drawer" @close="modalShell.requestClose">
     <template #nav>
       <template v-for="group in navGroups" :key="group.key">
         <div class="nav-group-title">{{ group.label }}</div>
@@ -81,9 +87,9 @@
           <GeneralSettings />
         </div>
 
-        <!-- Ollama 设置 -->
-        <div v-if="currentSection === 'ollama'" class="section">
-          <OllamaSettings />
+        <!-- 常规设置 -->
+        <div v-if="currentSection === 'general'" class="section">
+          <GeneralSettings />
         </div>
 
         <!-- WeKnora Cloud -->
@@ -155,9 +161,9 @@
           <SandboxSettings />
         </div>
 
-        <!-- 系统信息 -->
-        <div v-if="currentSection === 'system'" class="section">
-          <SystemInfo />
+        <!-- 关于：授权状态 + 本机标识 + 软件版本合并成一页（v2.9） -->
+        <div v-if="currentSection === 'about'" class="section">
+          <AboutSettings />
         </div>
 
         <!-- 系统管理员可见的全局运行时设置 -->
@@ -180,12 +186,6 @@
 
         <div v-if="currentSection === 'system-audit-log'" class="section">
           <SystemAuditLog />
-        </div>
-
-        <!-- 用户信息（账户基础信息：ID / 用户名 / 邮箱 / 注册时间）。
-           用户的基本信息不该跟 owner 权限绑定。 -->
-        <div v-if="currentSection === 'userprofile'" class="section">
-          <UserProfile />
         </div>
 
         <!-- 空间信息 -->
@@ -213,6 +213,7 @@ import { useRoute, useRouter } from 'vue-router'
 import type { LocationQueryRaw } from 'vue-router'
 import { useUIStore } from '@/stores/ui'
 import { useAuthStore } from '@/stores/auth'
+import { useLicense } from '@/composables/useLicense'
 import { useDeploymentCapabilitiesStore } from '@/stores/deploymentCapabilities'
 import { useI18n } from 'vue-i18n'
 import { MessagePlugin } from 'tdesign-vue-next'
@@ -220,32 +221,30 @@ import { useModalShell } from '@/composables/useModalShell'
 import { useAssistantPageContext } from '@/composables/useAssistantPageContext'
 import SettingsModalShell from '@/components/SettingsModalShell.vue'
 import ResourceIcon from '@/components/icons/ResourceIcon.vue'
-import SystemInfo from './SystemInfo.vue'
-import TenantInfo from './TenantInfo.vue'
-import UserProfile from './UserProfile.vue'
-import GeneralSettings from './GeneralSettings.vue'
 import ModelSettings from './ModelSettings.vue'
 import ModelCatalog from '../system/ModelCatalog.vue'
-import OllamaSettings from './OllamaSettings.vue'
-import WebSearchSettings from './WebSearchSettings.vue'
-import ChatHistorySettings from './ChatHistorySettings.vue'
-import MemorySettings from './MemorySettings.vue'
-import EnvVarSettings from './EnvVarSettings.vue'
-import CredentialVaultSettings from './CredentialVaultSettings.vue'
-import MemoryWorkspaceSettings from './MemoryWorkspaceSettings.vue'
-import DefaultSettings from './DefaultSettings.vue'
-import AssistantSettings from './AssistantSettings.vue'
-import VectorStoreSettings from './VectorStoreSettings.vue'
-import ParserEngineSettings from './ParserEngineSettings.vue'
-import StorageBackendSettings from './StorageBackendSettings.vue'
-import SandboxSettings from './SandboxSettings.vue'
-import WeKnoraCloudSettings from './WeKnoraCloudSettings.vue'
-import TenantMembers from './TenantMembers.vue'
 import SystemSettings from '@/views/system/SystemSettings.vue'
 import RuntimeQueues from '@/views/system/RuntimeQueues.vue'
 import PlatformAPIKeys from '@/views/system/PlatformAPIKeys.vue'
 import SystemAuditLog from '@/views/system/SystemAuditLog.vue'
 import IntegrationSettingsSection from '@/views/integrations/IntegrationSettingsSection.vue'
+import GeneralSettings from './GeneralSettings.vue'
+import WeKnoraCloudSettings from './WeKnoraCloudSettings.vue'
+import WebSearchSettings from './WebSearchSettings.vue'
+import ChatHistorySettings from './ChatHistorySettings.vue'
+import DefaultSettings from './DefaultSettings.vue'
+import MemoryWorkspaceSettings from './MemoryWorkspaceSettings.vue'
+import AssistantSettings from './AssistantSettings.vue'
+import MemorySettings from './MemorySettings.vue'
+import EnvVarSettings from './EnvVarSettings.vue'
+import CredentialVaultSettings from './CredentialVaultSettings.vue'
+import VectorStoreSettings from './VectorStoreSettings.vue'
+import ParserEngineSettings from './ParserEngineSettings.vue'
+import StorageBackendSettings from './StorageBackendSettings.vue'
+import SandboxSettings from './SandboxSettings.vue'
+import AboutSettings from './AboutSettings.vue'
+import TenantInfo from './TenantInfo.vue'
+import TenantMembers from './TenantMembers.vue'
 import {
   INTEGRATION_PREVIEW_ITEMS,
   INTEGRATION_TAB_CAPABILITY,
@@ -271,6 +270,7 @@ const route = useRoute()
 const router = useRouter()
 const uiStore = useUIStore()
 const authStore = useAuthStore()
+const licenseStore = useLicense()
 const deploymentCapabilities = useDeploymentCapabilitiesStore()
 const { t, te } = useI18n()
 const hostSkills = computed(() => hostSkillsOnly(
@@ -333,6 +333,9 @@ const syncSettingsRoute = (sectionKey: string) => {
 }
 
 const isSectionSupported = (key: string): boolean => {
+  // 「关于」与后端能力位无关：它只在「启用了授权校验」的运行形态里出现
+  // （当前即桌面 .app）。server 形态没有授权服务，整块不显示。
+  if (key === 'about') return licenseStore.enabled.value
   if (isIntegrationSection(key)) {
     return deploymentCapabilities.isSupported(
       INTEGRATION_TAB_CAPABILITY[integrationTabFromSection(key)],
@@ -361,6 +364,21 @@ const canSeeSection = (key: string): boolean => {
   return authStore.hasRole(min)
 }
 
+// OEM 设置页分区白名单（v2.8 收敛）。
+//
+// 交付形态只面向两类事：配置对话能力（模型 / 联网搜索 / 检索与解析 / 存储），
+// 以及本机授权与版本。窗口栏里的「系统设置」(system-global) 按交付要求隐藏，
+// 需要放开内网模型服务时把 'system-global' 加回来即可。
+const OEM_SETTINGS_SECTIONS = new Set([
+  'models',
+  'websearch',
+  'vectorstore',
+  'parser',
+  'storage',
+  // 关于：授权状态、本机标识、软件版本与续期入口合并成一页。
+  'about',
+])
+
 const navItems = computed(() => {
   // 一律走 SETTINGS_SECTION_MIN_ROLE 表，避免 ad-hoc isAdmin/isOwner 散落在多处。
   // 服务端在每条路由上仍以 g.Viewer/Admin/Owner 为准，这里只决定 UI 是
@@ -373,7 +391,6 @@ const navItems = computed(() => {
   }))
   const all: NavItem[] = [
     { key: 'general', icon: 'setting', label: t('general.title') },
-    { key: 'ollama', icon: 'server', label: 'Ollama' },
     { key: 'weknoracloud', icon: '', label: 'WeKnora Cloud' },
     { key: 'models', icon: 'control-platform', label: t('settings.modelManagement') },
     { key: 'websearch', icon: 'search', label: t('settings.webSearchConfig') },
@@ -384,13 +401,13 @@ const navItems = computed(() => {
     { key: 'parser', icon: 'file-search', label: t('settings.parserEngine') },
     { key: 'storage', icon: 'cloud', label: t('settings.storageEngine') },
     { key: 'sandbox', icon: 'code', label: t('settings.sandbox.title') },
-    { key: 'system', icon: 'info-circle', label: t('settings.versionInfo') },
+    // 关于：授权信息与版本信息合并（v2.9），桌面发行版专有。
+    { key: 'about', icon: 'info-circle', label: '关于' },
     { key: 'system-global', icon: 'server', label: t('settings.system') },
     { key: 'model-catalog', icon: 'control-platform', label: t('modelCatalog.title') },
     { key: 'runtime-queues', icon: 'queue', label: t('settings.taskQueue') },
     { key: 'platform-api-keys', icon: 'secured', label: t('platformApiKeys.title') },
     { key: 'system-audit-log', icon: 'history', label: t('system.globalSettings.audit.tabLabel') },
-    { key: 'userprofile', icon: 'user', label: t('userProfile.title') },
     { key: 'mymemory', icon: 'bookmark', label: t('memorySettings.title') },
     { key: 'assistant', icon: 'assistant', label: t('assistantSettings.title') },
     { key: 'envvars', icon: 'key', label: envNavLabel() },
@@ -399,13 +416,9 @@ const navItems = computed(() => {
     { key: 'members', icon: 'usergroup', label: t('tenantMember.title') },
     ...integrationItems,
   ]
-  // currentTenantRole 为空表示「membership 还没加载」—— 比起渲染整套
-  // viewer 入口然后角色一返回又消失，先卡住不渲染更稳，跟原先 members
-  // 入口的策略一致。
-  if (!authStore.currentTenantRole && !authStore.canAccessAllTenants) {
-    return [] as NavItem[]
-  }
-  return all.filter((it) => canSeeSection(it.key) && isSectionSupported(it.key))
+  return all.filter(
+    (it) => canSeeSection(it.key) && isSectionSupported(it.key) && OEM_SETTINGS_SECTIONS.has(it.key),
+  )
 })
 
 const navGroups = computed<NavGroup[]>(() => {
@@ -415,47 +428,29 @@ const navGroups = computed<NavGroup[]>(() => {
   // 关键调整：把个人偏好(general)和用户信息收进「账户」；
   // 把空间内功能开关(chathistory)从「平台」挪到「空间」；
   // 把检索引擎和外部集成合并为「数据与扩展」，避免两个 2~3 项的窄分组。
+  // OEM 改造：分组收敛为「模型与运行时」「数据与存储」「系统」三组，
+  // 避免出现空的账户/团队/集成分组。
   return [
-    {
-      key: 'account',
-      label: t('settings.navGroups.account'),
-      items: pickItems(['general', 'userprofile', 'assistant', 'mymemory', 'envvars', 'credentialvault']),
-    },
-    {
-      key: 'workspace',
-      label: t('settings.navGroups.workspace'),
-      items: pickItems(['tenant', 'members', 'defaults', 'chathistory', 'memory']),
-    },
     {
       key: 'models_runtime',
       label: t('settings.navGroups.modelsRuntime'),
-      items: pickItems(['models', 'ollama', 'weknoracloud']),
-    },
-    {
-      key: 'integrations',
-      label: t('integrations.title'),
-      items: pickItems(INTEGRATION_PREVIEW_ITEMS.map((item) => integrationSectionKey(item.key))),
+      items: pickItems(['models']),
     },
     {
       key: 'data_extensions',
       label: t('settings.navGroups.dataExtensions'),
-      items: pickItems([
-        'vectorstore',
-        'parser',
-        'storage',
-        'sandbox',
-        'websearch',
-      ]),
-    },
-    {
-      key: 'system_administration',
-      label: t('settings.navGroups.systemAdministration'),
-      items: pickItems(['system-global', 'model-catalog', 'runtime-queues', 'platform-api-keys', 'system-audit-log']),
+      // websearch 放在这里：联网搜索属于「数据源」的一种，与检索相关。
+      // 之前整块被 OEM 裁掉，现在对话输入框有「联网搜索」开关，
+      // 用户需要能在这里配置搜索引擎实例。
+      items: pickItems(['websearch', 'vectorstore', 'parser', 'storage']),
     },
     {
       key: 'platform',
       label: t('settings.navGroups.platform'),
-      items: pickItems(['system']),
+      // v2.9：授权与版本合并成「关于」，系统分组只剩这一项。
+      // 「系统设置」（system-global：SSRF 白名单、对话最大回答长度等）仍隐藏，
+      // 需要放开内网模型服务时把 'system-global' 加回 OEM_SETTINGS_SECTIONS。
+      items: pickItems(['about']),
     },
   ].filter((group) => group.items.length > 0)
 })
@@ -496,9 +491,39 @@ const handleSubMenuClick = (parentKey: string, childKey: string) => {
 }
 
 // 控制弹窗显示
+//
+// 历史行为：`route.path === '/platform/settings' || uiStore.showSettingsModal`
+// —— 这是个"或"关系，一旦 showSettingsModal 被置 true（侧栏点击「模型管理」
+// 就会置 true），离开设置路由后它仍为 true，设置页继续盖住整个内容区，
+// 导致点其他菜单「切不过去」（表现为菜单点了没反应）。
+//
+// 修复：以路由为唯一权威。只有身处 /platform/settings 时才算可见；
+// showSettingsModal 保留为"从内部快捷键唤起"的辅助信号，但要和路由一致。
+// 路由一旦离开设置页，下面这个 watch 会把残留的 showSettingsModal 清掉，
+// 保证下次进来时状态干净。
 const visible = computed(() => {
   return route.path === '/platform/settings' || uiStore.showSettingsModal
 })
+
+/*
+ * OEM：Ollama 分区已整体移除，但上游仍存在把用户送进 'ollama' 分区的入口
+ * （例如 initialization/ollama 相关引导）。为避免落进空白页，
+ * 这里统一把已下线分区重定向到「模型管理」。
+ */
+const RETIRED_SECTIONS: Record<string, string> = { ollama: 'models' }
+const remapRetiredSection = (section: string): string => RETIRED_SECTIONS[section] || section
+
+// 路由离开设置页时清理残留的 showSettingsModal。
+// 不加 immediate：首帧可能还没解析出路由，过早清理会误关已打开的设置。
+watch(
+  () => route.path,
+  (path) => {
+    if (path !== '/platform/settings' && uiStore.showSettingsModal) {
+      uiStore.closeSettings()
+    }
+  },
+  { flush: 'post' },
+)
 
 useAssistantPageContext(() => {
   if (!visible.value) return null
@@ -544,7 +569,8 @@ const redirectToToolbox = (section: string, subSection?: string | null) => {
 // 监听初始导航设置
 watch(() => uiStore.settingsInitialSection, (section) => {
   if (section && visible.value) {
-    const normalizedSection = normalizeSettingsSection(section)
+    // OEM：已下线分区（ollama）重定向到 models，避免落进空白页
+    const normalizedSection = remapRetiredSection(normalizeSettingsSection(section))
     if (redirectToToolbox(normalizedSection, uiStore.settingsInitialSubSection)) return
     if (deploymentCapabilities.loaded && !isSectionSupported(normalizedSection)) {
       MessagePlugin.warning(t('settings.capabilityUnavailable'))
@@ -586,7 +612,9 @@ watch(
       section,
       typeof route.query.tab === 'string' ? route.query.tab : undefined,
     )
-    if (capabilitiesLoaded && !isSectionSupported(normalizedSection)) {
+    // 白名单外的分区（例如 v2.8 隐藏的 system-global）直接回退，
+    // 否则手输 ?section=system-global 仍能绕过菜单把面板调出来。
+    if (capabilitiesLoaded && (!isSectionSupported(normalizedSection) || !OEM_SETTINGS_SECTIONS.has(normalizedSection))) {
       MessagePlugin.warning(t('settings.capabilityUnavailable'))
       const fallback = navItems.value[0]?.key || 'general'
       currentSection.value = fallback
@@ -594,9 +622,9 @@ watch(
       syncSettingsRoute(fallback)
       return
     }
-    currentSection.value = normalizedSection
+    currentSection.value = remapRetiredSection(normalizedSection)
     currentSubSection.value = ''
-    syncSettingsRoute(normalizedSection)
+    syncSettingsRoute(currentSection.value)
   },
   { immediate: true },
 )

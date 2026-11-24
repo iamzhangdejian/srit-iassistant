@@ -217,6 +217,8 @@ const props = defineProps<{
   currentAgentId: string;
   agents?: CustomAgent[];
   allModels?: ModelConfig[];
+  /** 输入框当前选中的对话模型；内置智能体未配 model_id 时用它作为实际模型。 */
+  currentModelId?: string;
 }>();
 
 const emit = defineEmits<{
@@ -377,11 +379,8 @@ const formatAgentNotReadyReasons = (
   isBuiltin: boolean,
 ): string[] => {
   return reasonKeys.map((key) => {
-    if (key === 'summary_model') {
+    if (key === 'chat_model') {
       return isBuiltin ? t('input.agentMissingSummaryModel') : t('input.customAgentMissingSummaryModel');
-    }
-    if (key === 'rerank_model') {
-      return isBuiltin ? t('input.agentMissingRerankModel') : t('input.customAgentMissingRerankModel');
     }
     return t('input.agentMissingAllowedTools');
   });
@@ -390,7 +389,13 @@ const formatAgentNotReadyReasons = (
 const getAgentNotReadyReasonKeysFor = (agent: CustomAgent, sourceTenantId?: string) => {
   const isAgentMode = agent.config?.agent_mode === 'smart-reasoning';
   const isSharedAgent = !!sourceTenantId;
-  return getAgentNotReadyReasonKeys(agent.config, modelsList.value, {
+  // 内置智能体（快速问答等）没有 model_id，真正的对话模型来自输入框当前选中项
+  // （发送时作为 summary_model_id 交给后端当 modelOverride），这里保持一致，
+  // 避免下拉里把已选好模型的智能体标成未就绪。
+  const effectiveConfig = agent.is_builtin && !isSharedAgent
+    ? { ...agent.config, model_id: agent.config?.model_id?.trim() || props.currentModelId || '' }
+    : agent.config;
+  return getAgentNotReadyReasonKeys(effectiveConfig, modelsList.value, {
     isAgentMode,
     isSharedAgent,
   });

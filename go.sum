@@ -3818,6 +3818,8 @@ github.com/weaviate/weaviate v1.37.3 h1:TI2m2+QFk8PAkGQRP+ynaKVW2UTZjLFFa2fCtgu2
 github.com/weaviate/weaviate v1.37.3/go.mod h1:C4CZ7RFjzRwPkvzO3nXeSJ3m5Q7cpWxYtiGOcDxpW1s=
 github.com/weaviate/weaviate-go-client/v5 v5.7.3 h1:AB7asp3Nv3QMh34EtJarpezQQ600p6TJVrdRhmisrMI=
 github.com/weaviate/weaviate-go-client/v5 v5.7.3/go.mod h1:Q6lG7oDiKZLcE0UPiPkJ2+V7bOejSOpgJV3kZari1MY=
+github.com/webview/webview_go v0.0.0-20240831120633-6173450d4dd6 h1:VQpB2SpK88C6B5lPHTuSZKb2Qee1QWwiFlC5CKY4AW0=
+github.com/webview/webview_go v0.0.0-20240831120633-6173450d4dd6/go.mod h1:yE65LFCeWf4kyWD5re+h4XNvOHJEXOCOuJZ4v8l5sgk=
 github.com/willf/bitset v1.1.11 h1:N7Z7E9UvjW+sGsEl7k/SJrvY2reP1A07MrGuCjIOjRE=
 github.com/willf/bitset v1.1.11/go.mod h1:83CECat5yLh5zVOf4P1ErAgKA5UDvKtgyUABdr3+MjI=
 github.com/wk8/go-ordered-map/v2 v2.1.8 h1:5h/BUHu93oj4gIdvHHHGsScSTMijfx5PeYkE/fJgbpc=

@@ -6,10 +6,10 @@ import (
 	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
-	stderrors "errors"
 	"fmt"
 	"net/http"
 	"strings"
+	"sync/atomic"
 
 	"github.com/gin-gonic/gin"
 
@@ -17,6 +17,7 @@ import (
 	"github.com/Tencent/WeKnora/internal/config"
 	"github.com/Tencent/WeKnora/internal/errors"
 	"github.com/Tencent/WeKnora/internal/handler/dto"
+	"github.com/Tencent/WeKnora/internal/licenser"
 	"github.com/Tencent/WeKnora/internal/logger"
 	"github.com/Tencent/WeKnora/internal/types"
 	"github.com/Tencent/WeKnora/internal/types/interfaces"
@@ -25,9 +26,62 @@ import (
 
 var liteSetupToken string
 
+// passwordLoginDisabled 表示交付形态已整组关闭账号密码认证面（注册 / 密码登录 /
+// OIDC / 改密）。由 router 在装配路由时按 FeatCutPasswordAuth 写入，仅用于让
+// /auth/config 如实回报「这些能力不存在」，真正的拦截发生在路由注册处
+// （路由不注册 ⇒ 请求 404），不依赖这个标志。
+var passwordLoginDisabled atomicBool
+
+// atomicBool 只为一个标志位服务，避免为此引入 sync/atomic 的 Bool 类型方法集
+// 在测试里被误用。
+type atomicBool struct{ v uint32 }
+
+func (b *atomicBool) Store(val bool) {
+	if val {
+		atomic.StoreUint32(&b.v, 1)
+		return
+	}
+	atomic.StoreUint32(&b.v, 0)
+}
+
+func (b *atomicBool) Load() bool { return atomic.LoadUint32(&b.v) == 1 }
+
+// SetPasswordLoginDisabled 由 router 调用，见上。
+func SetPasswordLoginDisabled(disabled bool) { passwordLoginDisabled.Store(disabled) }
+
 // SetLiteSetupToken is called by the native desktop host before serving requests.
 // Web deployments leave it empty and cannot issue anonymous administrator tokens.
 func SetLiteSetupToken(token string) { liteSetupToken = token }
+
+// SetLicenseService 注入授权服务。由容器在装配阶段调用。
+//
+// 用 setter 而不是改 NewAuthHandler 的签名：那个构造函数已经被多处
+// 调用（含测试），加参数会让所有调用点一起改，收益不抵成本。
+func (h *AuthHandler) SetLicenseService(svc *licenser.Service) {
+	h.licenseSvc = svc
+	// 打一行日志：这个注入一旦漏掉，表现是「界面上有授权提示但登录照常进行」，
+	// 非常难从现象反推原因，留个启动期锚点省事。
+	logger.Infof(context.Background(), "[auth] license service injected: enabled=%v", svc.Enabled())
+}
+
+// licenseGate 判断当前请求是否允许签发令牌。
+//
+// 返回空字符串表示放行；否则返回应展示给用户的中文说明。
+// 这里刻意不返回 error：调用方需要的是「能不能登」，而不是错误
+// 细节；错误细节走日志，用户看到的是可操作的提示。
+func (h *AuthHandler) licenseGate(c *gin.Context, path string) (blocked bool, code, message string) {
+	if h.licenseSvc == nil || !h.licenseSvc.Enabled() {
+		return false, "", ""
+	}
+	// 注意这里用 AllowSessionIssue 而不是 Gate：Gate 会看到 login 在
+	// readOnlyAllowlist 里就直接放行，那样授权闸门在登录口就形同虚设。
+	// 闸门要判的是「能不能发令牌」，这是两件不同的事。
+	if code, message = h.licenseSvc.AllowSessionIssue(); code == "" {
+		return false, "", ""
+	}
+	logger.Warnf(c.Request.Context(), "[license] blocked %s: code=%s", path, code)
+	return true, code, message
+}
 
 const (
 	oidcNonceCookieName   = "weknora_oidc_nonce"
@@ -48,6 +102,13 @@ type AuthHandler struct {
 	// fixtures — the share-link endpoints respond 503 rather than
 	// blocking the rest of the auth surface.
 	invitationSvc interfaces.TenantInvitationService
+	// licenseSvc 是授权闸门。nil 表示不启用。
+	//
+	// 挂在 AuthHandler 而不是只靠中间件，是因为有两个入口会签发令牌
+	// 却拿不到正常的路由上下文：/auth/login 是 noAuthAPI 白名单，
+	// /auth/auto-setup 同样是——它们能绕过只挂在业务路由上的中间件。
+	// 授权判定必须在这两处重复一次，且落同一个 Gate()，保证三处一致。
+	licenseSvc *licenser.Service
 }
 
 // NewAuthHandler creates a new auth handler instance with the provided services
@@ -276,6 +337,19 @@ func (h *AuthHandler) Login(c *gin.Context) {
 		logger.Error(ctx, "Missing required login fields")
 		appErr := errors.NewValidationError("Email and password are required")
 		c.Error(appErr)
+		return
+	}
+
+	// 授权闸门：必须在签发令牌之前拦住。
+	//
+	// 放在参数校验之后是为了让「没填密码」这类初级错误优先提示，
+	// 而不是让用户先看到一句「本机尚未获得有效授权」——那个提示
+	// 会让人以为密码不用填了。
+	if blocked, code, message := h.licenseGate(c, "/api/v1/auth/login"); blocked {
+		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{
+			"success": false,
+			"error":   gin.H{"code": code, "message": message},
+		})
 		return
 	}
 
@@ -765,79 +839,6 @@ func (h *AuthHandler) UpdateMyPreferences(c *gin.Context) {
 	})
 }
 
-// ChangePassword godoc
-// @Summary      修改密码
-// @Description  修改当前用户的登录密码。新密码须满足 8–32 位且同时包含字母与数字；开启复杂密码后还需包含大小写与特殊字符。成功后所有会话被撤销，需重新登录。
-// @Tags         认证
-// @Accept       json
-// @Produce      json
-// @Param        request  body      object{old_password=string,new_password=string}  true  "密码修改请求"
-// @Success      200      {object}  handler.MessageResponse                           "修改成功"
-// @Failure      400      {object}  errors.AppError                                  "请求参数错误"
-// @Security     Bearer
-// @Router       /auth/change-password [post]
-func (h *AuthHandler) ChangePassword(c *gin.Context) {
-	ctx := c.Request.Context()
-
-	logger.Info(ctx, "Start password change")
-
-	var req struct {
-		OldPassword string `json:"old_password" binding:"required"`
-		NewPassword string `json:"new_password" binding:"required"`
-	}
-
-	if err := c.ShouldBindJSON(&req); err != nil {
-		logger.Error(ctx, "Failed to parse password change request", err)
-		appErr := errors.NewValidationError("Invalid password change request").WithDetails(err.Error())
-		c.Error(appErr)
-		return
-	}
-
-	// Get current user
-	user, err := h.userService.GetCurrentUser(ctx)
-	if err != nil {
-		logger.Errorf(ctx, "Failed to get current user: %v", err)
-		appErr := errors.NewUnauthorizedError("Failed to get user information").WithDetails(err.Error())
-		c.Error(appErr)
-		return
-	}
-
-	// Change password. Policy is enforced in the service after the old
-	// password is verified so a wrong current credential is not masked
-	// by a complexity error.
-	err = h.userService.ChangePassword(ctx, user.ID, req.OldPassword, req.NewPassword)
-	if err != nil {
-		switch {
-		case service.IsPasswordPolicyError(err):
-			appErr := errors.NewValidationError("Password policy violation").
-				WithDetails(service.DetailPasswordPolicy)
-			_ = c.Error(appErr)
-			return
-		case stderrors.Is(err, service.ErrInvalidOldPassword):
-			appErr := errors.NewBadRequestError("Current password is incorrect").
-				WithDetails(service.DetailInvalidOldPassword)
-			c.Error(appErr)
-			return
-		case stderrors.Is(err, service.ErrSamePassword):
-			appErr := errors.NewValidationError("New password must differ from current password").
-				WithDetails(service.DetailSamePassword)
-			c.Error(appErr)
-			return
-		default:
-			logger.Errorf(ctx, "Failed to change password: %v", err)
-			appErr := errors.NewBadRequestError("Password change failed").WithDetails(err.Error())
-			c.Error(appErr)
-			return
-		}
-	}
-
-	logger.Infof(ctx, "Password changed successfully for user: %s", user.Email)
-	c.JSON(http.StatusOK, gin.H{
-		"success": true,
-		"message": "Password changed successfully",
-	})
-}
-
 // GetAuthConfig godoc
 // @Summary      获取认证配置
 // @Description  返回当前部署的注册模式与密码复杂度开关，供前端决定是否展示注册入口以及密码校验规则
@@ -861,11 +862,20 @@ func (h *AuthHandler) GetAuthConfig(c *gin.Context) {
 		h.configInfo,
 		h.systemSettingSvc,
 	)
-	c.JSON(http.StatusOK, gin.H{
+	payload := gin.H{
 		"success":                  true,
 		"registration_mode":        mode,
 		"complex_password_enabled": complexPasswordEnabled,
-	})
+	}
+	if passwordLoginDisabled.Load() {
+		// 交付形态：注册、密码登录、OIDC、改密接口均未注册。这里如实回报，
+		// 免得运维/前端把「404」当成故障，也避免 UI 依据配置去渲染入口。
+		payload["registration_mode"] = "closed"
+		payload["complex_password_enabled"] = false
+		payload["password_login_enabled"] = false
+		payload["oidc_enabled"] = false
+	}
+	c.JSON(http.StatusOK, payload)
 }
 
 // SwitchTenant godoc
@@ -937,6 +947,20 @@ func (h *AuthHandler) AutoSetup(c *gin.Context) {
 	if liteSetupToken == "" ||
 		subtle.ConstantTimeCompare([]byte(c.GetHeader("X-WeKnora-Desktop-Token")), []byte(liteSetupToken)) != 1 {
 		_ = c.Error(errors.NewUnauthorizedError("desktop authentication is required"))
+		return
+	}
+
+	// 授权闸门：这是最容易被遗漏的一条路径。
+	//
+	// /auth/auto-setup 凭一个仅存在于本进程内的随机令牌就能无密码建号
+	// 并签发 token，完全不经过 /auth/login。如果只在 Login 上挂闸门，
+	// 攻击者（或换了个客户端的用户）可以绕开登录直接拿令牌。
+	// 因此这里必须独立判定一次。
+	if blocked, code, message := h.licenseGate(c, "/api/v1/auth/auto-setup"); blocked {
+		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{
+			"success": false,
+			"error":   gin.H{"code": code, "message": message},
+		})
 		return
 	}
 

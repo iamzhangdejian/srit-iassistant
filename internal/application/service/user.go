@@ -774,53 +774,6 @@ func (s *userService) DeleteUser(ctx context.Context, id string) error {
 	return nil
 }
 
-// ChangePassword changes user password after verifying the current
-// credential. The new password must satisfy ValidatePasswordPolicy so
-// self-service rotation cannot introduce weaker passwords than
-// registration / admin reset allow. On success every outstanding session
-// is revoked so a stolen token cannot survive the rotation.
-func (s *userService) ChangePassword(ctx context.Context, userID, oldPassword, newPassword string) error {
-	user, err := s.userRepo.GetUserByID(ctx, userID)
-	if err != nil {
-		return err
-	}
-
-	// Verify old password before policy checks so callers with a wrong
-	// current credential get a clear failure instead of a policy error.
-	if err := bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(oldPassword)); err != nil {
-		return ErrInvalidOldPassword
-	}
-
-	if err := bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(newPassword)); err == nil {
-		return ErrSamePassword
-	}
-
-	if err := ValidatePasswordPolicy(newPassword, s.complexPasswordEnabled(ctx)); err != nil {
-		return err
-	}
-
-	// Hash new password
-	hashedPassword, err := bcrypt.GenerateFromPassword([]byte(newPassword), bcrypt.DefaultCost)
-	if err != nil {
-		return err
-	}
-
-	user.PasswordHash = string(hashedPassword)
-	user.UpdatedAt = time.Now()
-	if user.Preferences.OidcOnlyLogin != nil && *user.Preferences.OidcOnlyLogin {
-		cleared := false
-		user.Preferences.OidcOnlyLogin = &cleared
-	}
-
-	if err := s.userRepo.UpdateUser(ctx, user); err != nil {
-		return err
-	}
-
-	// Invalidate every outstanding session so a stolen token cannot
-	// survive a password rotation.
-	return s.tokenRepo.RevokeTokensByUserID(ctx, userID)
-}
-
 // AdminResetPassword replaces a user's password without checking the previous
 // credential. Authorization and the cannot-reset-self rule live at the system
 // admin HTTP boundary; this service owns the security-critical persistence and

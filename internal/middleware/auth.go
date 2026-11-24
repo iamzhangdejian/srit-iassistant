@@ -47,10 +47,14 @@ var noAuthAPI = map[string][]string{
 	"/api/v1/auth/invitations/lookup": {"POST"},
 	"/api/v1/auth/register-by-invite": {"POST"},
 	"/api/v1/auth/config":             {"GET"},
-	"/api/v1/auth/oidc/config":        {"GET"},
-	"/api/v1/auth/oidc/url":           {"GET"},
-	"/api/v1/auth/oidc/start":         {"GET"},
-	"/api/v1/auth/oidc/callback":      {"GET"},
+	// 授权接口无需认证：没有授权时用户必须能读到本机机器码（否则无码可
+	// 申请，形成死锁），也必须能提交授权码。这两个接口本身不含用户数据，
+	// 泄露风险仅限于「这台机器的 MAC 指纹」，属于必须公开的启动信息。
+	"/api/v1/license":            {"GET", "POST"},
+	"/api/v1/auth/oidc/config":   {"GET"},
+	"/api/v1/auth/oidc/url":      {"GET"},
+	"/api/v1/auth/oidc/start":    {"GET"},
+	"/api/v1/auth/oidc/callback": {"GET"},
 	// MCP OAuth provider redirect: the third-party authorization server
 	// redirects the browser here without a WeKnora bearer token. The request
 	// is authenticated by the opaque, single-use `state` parameter instead.
@@ -60,6 +64,38 @@ var noAuthAPI = map[string][]string{
 	// before GET to validate Content-Type / Content-Length when rendering
 	// image previews — both verbs must be allowed for image links to work.
 	"/api/v1/files/presigned": {"GET", "HEAD"},
+}
+
+// PasswordAuthDisabled 表示交付形态已整组关闭账号密码认证面。
+//
+// 值写在中间件包里而不是 router 里，是因为两处都要用它，而 router 依赖
+// middleware（反向引用会成环）：router 据此不注册这些路由，本中间件据此
+// 对它们的请求直接回 404。单一路由表 + 中间件短路，语义才和「接口不存在」
+// 一致；否则这些路径会落进前端静态资源的 catch-all，再由 License 中间件
+// 回一个 LICENSE_MISSING 或 401 —— 把「接口已关闭」误报成「授权/登录问题」。
+const PasswordAuthDisabled = true
+
+// disabledAuthAPI 是 PasswordAuthDisabled 生效时对外表现为 404 的认证接口。
+// 只在 PasswordAuthDisabled 为 true 时使用；为 false 时这些路由正常注册。
+var disabledAuthAPI = map[string][]string{
+	"/api/v1/auth/register":           {"POST"},
+	"/api/v1/auth/register-by-invite": {"POST"},
+	"/api/v1/auth/invitations/lookup": {"POST"},
+	"/api/v1/auth/login":              {"POST"},
+	"/api/v1/auth/change-password":    {"POST"},
+	"/api/v1/auth/oidc/config":        {"GET"},
+	"/api/v1/auth/oidc/url":           {"GET"},
+	"/api/v1/auth/oidc/start":         {"GET"},
+	"/api/v1/auth/oidc/callback":      {"GET"},
+}
+
+// isDisabledAuthAPI 判断请求是否命中已关闭的账号密码认证接口。
+func isDisabledAuthAPI(path, method string) bool {
+	if !PasswordAuthDisabled {
+		return false
+	}
+	methods, ok := disabledAuthAPI[path]
+	return ok && slices.Contains(methods, method)
 }
 
 // 检查请求是否在无需认证的API列表中
@@ -135,6 +171,19 @@ func Auth(
 		// ignore OPTIONS request
 		if c.Request.Method == http.MethodOptions {
 			c.Next()
+			return
+		}
+
+		// 交付形态没有账号密码认证面：这些接口不注册，请求应当得到 404，
+		// 而不是被后续链路解释成「未授权」或「没登录」。
+		if isDisabledAuthAPI(c.Request.URL.Path, c.Request.Method) {
+			c.AbortWithStatusJSON(http.StatusNotFound, gin.H{
+				"success": false,
+				"error": gin.H{
+					"code":    "AUTH_ENDPOINT_DISABLED",
+					"message": "账号密码认证已关闭，请使用授权码进入系统",
+				},
+			})
 			return
 		}
 

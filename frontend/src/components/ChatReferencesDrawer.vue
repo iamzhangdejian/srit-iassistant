@@ -65,7 +65,10 @@
             v-for="section in sections"
             :key="section.id"
             class="chat-references-panel__section"
-            :class="{ 'chat-references-panel__section--documents': section.id === 'documents' }"
+            :class="{
+              'chat-references-panel__section--documents': section.id === 'documents',
+              'chat-references-panel__section--wiki': section.id === 'wiki',
+            }"
           >
             <h4 v-if="sections.length > 1" class="chat-references-panel__section-title">
               {{ sectionTitle(section.id) }}
@@ -79,6 +82,7 @@
               :class="{
                 'reference-item--web': item.kind === 'web',
                 'reference-item--document': item.kind === 'document',
+                'reference-item--wiki': item.kind === 'wiki',
                 'reference-item--tool': item.kind === 'tool',
                 'is-highlighted': item.key === activeHighlightKey,
               }"
@@ -86,7 +90,7 @@
               <component
                 :is="item.kind === 'web' ? 'a' : 'div'"
                 class="reference-item__body"
-                :class="{ 'is-expandable': item.kind === 'document' && hasMoreContent(item) }"
+                :class="{ 'is-expandable': (item.kind === 'document' || item.kind === 'wiki') && hasMoreContent(item) }"
                 :href="item.kind === 'web' ? item.url : undefined"
                 :target="item.kind === 'web' ? '_blank' : undefined"
                 :rel="item.kind === 'web' ? 'noopener noreferrer' : undefined"
@@ -185,6 +189,8 @@ import { REFERENCES_PANEL_WIDTH, useChatReferencesDrawer } from '@/composables/u
 import ArtifactFileIcon from '@/views/chat/components/ArtifactFileIcon.vue'
 import ChatReferenceSourceView from '@/components/ChatReferenceSourceView.vue'
 import PanelResizeHandle from '@/components/PanelResizeHandle.vue'
+// OEM: 用于构造「知识库 id -> 类型」映射，区分文档与 Wiki 来源
+import { useChatResourcesStore } from '@/stores/chatResources'
 import {
   buildReferenceSections,
   formatReferenceSnippet,
@@ -200,6 +206,8 @@ const props = defineProps<{
 const { t } = useI18n()
 const router = useRouter()
 const drawer = useChatReferencesDrawer()
+// OEM: 空间级知识库快照，含每个 KB 的 type（document / faq / wiki）
+const chatResourcesStore = useChatResourcesStore()
 
 const listElement = ref<HTMLElement | null>(null)
 const itemElements = new Map<string, HTMLElement>()
@@ -267,7 +275,9 @@ function savePanelWidths() {
 }
 
 function canOpenSource(item: ReferenceListItem) {
-  return !props.embeddedMode && item.kind === 'document' && !!item.knowledgeId
+  // OEM: Wiki 来源与文档一样可点开溯源，跳转各自对应的页面
+  const isKnowledgeItem = item.kind === 'document' || item.kind === 'wiki'
+  return !props.embeddedMode && isKnowledgeItem && !!item.knowledgeId
 }
 
 function openItemSource(item: ReferenceListItem) {
@@ -292,7 +302,24 @@ function onSourceUnavailable() {
   backToList()
 }
 
-const sections = computed(() => buildReferenceSections(references.value))
+// OEM 改造：把「知识库 id -> 类型」映射传给 buildReferenceSections，
+// 让检索结果能区分「文档」与「Wiki」两类来源。
+// 映射来自已加载的知识库列表（chatResources / settings store）；
+// 拿不到时退化为全部算作文档，不会丢内容。
+const kbTypeById = computed(() => {
+  const map = new Map<string, string>()
+  try {
+    // chatResourcesStore.rawKnowledgeBases 是空间级知识库快照（含 type 字段）
+    for (const kb of chatResourcesStore.rawKnowledgeBases ?? []) {
+      if (kb?.id && kb?.type) map.set(String(kb.id), String(kb.type))
+    }
+  } catch {
+    /* 映射缺失不是致命错误：退化为全部按文档展示 */
+  }
+  return map
+})
+
+const sections = computed(() => buildReferenceSections(references.value, kbTypeById.value))
 const totalCount = computed(() => sections.value.reduce((sum, section) => sum + section.items.length, 0))
 
 const activeHighlightKey = computed(() =>
@@ -301,7 +328,9 @@ const activeHighlightKey = computed(() =>
 
 const panelTitle = computed(() => {
   const webCount = sections.value.find((section) => section.id === 'web')?.items.length ?? 0
-  const docCount = sections.value.find((section) => section.id === 'documents')?.items.length ?? 0
+  const docCount =
+    (sections.value.find((section) => section.id === 'documents')?.items.length ?? 0) +
+    (sections.value.find((section) => section.id === 'wiki')?.items.length ?? 0)
   const toolCount = sections.value.find((section) => section.id === 'tools')?.items.length ?? 0
   if (toolCount > 0 && webCount === 0 && docCount === 0) {
     return t('chat.referencesDrawerTitleTools')
@@ -318,9 +347,11 @@ const panelTitle = computed(() => {
   return t('chat.referencesDrawerTitle')
 })
 
-function sectionTitle(id: 'web' | 'documents' | 'tools') {
+function sectionTitle(id: 'web' | 'documents' | 'wiki' | 'tools') {
   if (id === 'web') return t('chat.referencesDrawerWebSection')
   if (id === 'tools') return t('chat.referencesDrawerToolsSection')
+  // OEM: Wiki 单独成组，标题带「Wiki」字样，方便与文档区分
+  if (id === 'wiki') return 'Wiki'
   return t('chat.referencesDrawerDocsSection')
 }
 
@@ -623,7 +654,9 @@ watch(visible, (open) => {
   min-width: 0;
 }
 
-.reference-item--document {
+.reference-item--document,
+/* OEM: Wiki 来源与文档共用同一套列表样式，只靠分组标题与角标区分 */
+.reference-item--wiki {
   border-radius: var(--app-radius-md);
 
   &:hover:not(.is-highlighted) {

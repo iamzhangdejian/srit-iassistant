@@ -16,6 +16,14 @@ import (
 // It goes by the executable and never the working directory, so starting the
 // app from an untrusted folder cannot supply its config, keys or database.
 func desktopConfigRoot(execPath string) (string, bool) {
+	// 显式的资源根优先：Linux AppImage / Windows 便携包把资源放在
+	// usr/share/<app> 这类「不是可执行文件祖先」的目录里，靠向上查找找不到。
+	// AppRun / 启动脚本会把它导出为 WEKNORA_RESOURCE_ROOT。
+	if override := strings.TrimSpace(os.Getenv("WEKNORA_RESOURCE_ROOT")); override != "" {
+		if hasDesktopConfig(override) {
+			return override, true
+		}
+	}
 	if i := strings.Index(execPath, ".app/Contents/MacOS"); i >= 0 {
 		resources := filepath.Join(execPath[:i+len(".app/Contents")], "Resources")
 		if hasDesktopConfig(resources) {

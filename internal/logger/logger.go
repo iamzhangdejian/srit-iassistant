@@ -373,6 +373,11 @@ func resolveLogFormatFromEnv() string {
 }
 
 func defaultMacAppLogPath() string {
+	// 便携模式：日志也放进便携目录，避免家目录不可写时启动报警。
+	if portable := strings.TrimSpace(os.Getenv("WK_PORTABLE_DIR")); portable != "" {
+		return filepath.Join(portable, "logs", "desktop.log")
+	}
+
 	execPath, err := os.Executable()
 	if err != nil || !strings.Contains(execPath, ".app/Contents/MacOS") {
 		return ""
@@ -383,7 +388,7 @@ func defaultMacAppLogPath() string {
 		return ""
 	}
 
-	appName := "WeKnora Lite"
+	appName := "国研智研体"
 	if idx := strings.Index(execPath, ".app/Contents/MacOS"); idx >= 0 {
 		bundleName := filepath.Base(execPath[:idx+4])
 		if trimmed := strings.TrimSuffix(bundleName, ".app"); trimmed != "" {

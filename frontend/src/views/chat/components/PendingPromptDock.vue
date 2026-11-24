@@ -175,7 +175,7 @@ watch(() => prompts.value.map((p) => p.pending_id), (ids, previous = []) => {
 <style scoped lang="less">
 .prompt-dock {
   width: 100%;
-  max-width: 960px;
+  max-width: 680px;
   margin: 0 auto 8px;
   box-sizing: border-box;
   background: var(--td-bg-color-container);

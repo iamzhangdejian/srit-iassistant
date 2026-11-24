@@ -216,10 +216,18 @@ func (s *sessionService) resolveRetrievalTenantID(
 // This covers: system prompt, context template, temperature, max tokens, thinking,
 // citation output, retrieval thresholds, rewrite settings, fallback settings, FAQ strategy,
 // and history turns.
+//
+// retrievalEnabled tells whether this turn will actually retrieve knowledge. The
+// system prompt is chosen accordingly: a knowledge-base prompt tells the model to
+// answer only from supplied materials and to report what is missing otherwise,
+// which is wrong for a pure-chat turn (it makes the model refuse ordinary
+// questions like the current date). When retrieval is off we swap in the generic
+// conversation prompt instead and leave the agent's KB prompt untouched.
 func (s *sessionService) applyAgentOverridesToChatManage(
 	ctx context.Context,
 	customAgent *types.CustomAgent,
 	cm *types.ChatManage,
+	retrievalEnabled bool,
 ) {
 	if customAgent == nil {
 		return
@@ -230,9 +238,16 @@ func (s *sessionService) applyAgentOverridesToChatManage(
 
 	// Resolve inherited templates at request time; saved custom text remains authoritative.
 	systemPrompt, contextTemplate := s.cfg.ResolveCustomAgentPrompts(customAgent)
+	if !retrievalEnabled {
+		// Pure chat: ignore the knowledge-base prompt entirely. Explicit custom
+		// text is also replaced because a KB-oriented persona ("answer only from
+		// the reference materials") is exactly what breaks general conversation.
+		systemPrompt = s.cfg.ResolvePureChatPrompt()
+		logger.Infof(ctx, "Pure chat turn: using generic conversation system prompt")
+	}
 	if systemPrompt != "" {
 		cm.SummaryConfig.Prompt = systemPrompt
-		logger.Infof(ctx, "Using custom agent's system_prompt")
+		logger.Infof(ctx, "Using custom agent's system_prompt (retrieval_enabled=%v)", retrievalEnabled)
 	}
 	if contextTemplate != "" {
 		cm.SummaryConfig.ContextTemplate = contextTemplate

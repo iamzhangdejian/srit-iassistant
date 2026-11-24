@@ -25,6 +25,8 @@ export interface SessionForGrouping {
   description?: string
   user_id?: string
   parent_session_id?: string
+  /** 所属项目；空串表示未归属任何项目（例如项目被删除后脱离）。 */
+  project_id?: string
   originalIndex?: number
 }
 

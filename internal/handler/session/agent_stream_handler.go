@@ -958,6 +958,11 @@ func (h *AgentStreamHandler) handleComplete(ctx context.Context, evt event.Event
 		if h.artifactCollector != nil && suspended == nil {
 			collectCtx := context.WithoutCancel(h.ctx)
 			var artifacts types.MessageArtifacts
+			// On the host backend the workspace is the user's project, so
+			// CollectTarget refuses to scan it. Collect the paths the tools
+			// reported instead, which yields exactly this turn's deliverables
+			// and never the user's own sources.
+			written := service.TakeTurnWrites(h.sessionID)
 			if collectDir, skip := h.artifactCollector.CollectTarget(collectCtx, h.sessionID); !skip {
 				if collectDir == "" {
 					collectDir = skills.ArtifactOutputDir()
@@ -975,6 +980,30 @@ func (h *AgentStreamHandler) handleComplete(ctx context.Context, evt event.Event
 					logger.GetLogger(h.ctx).Warnf(
 						"artifact collect failed session=%s message=%s: %v",
 						h.sessionID, h.assistantMessageID, err,
+					)
+				}
+			} else if len(written) > 0 {
+				rootDir, rootOK := h.artifactCollector.WorkspaceRoot(collectCtx, h.sessionID)
+				if rootOK {
+					var err error
+					artifacts, err = h.artifactCollector.CollectPaths(
+						collectCtx,
+						h.sessionID,
+						h.assistantMessageID,
+						h.tenantID,
+						rootDir,
+						written,
+						h.emitArtifactsPending,
+					)
+					if err != nil {
+						logger.GetLogger(h.ctx).Warnf(
+							"artifact collect paths failed session=%s message=%s: %v",
+							h.sessionID, h.assistantMessageID, err,
+						)
+					}
+				} else {
+					logger.GetLogger(h.ctx).Infof(
+						"artifact collect paths skipped: no workspace root session=%s", h.sessionID,
 					)
 				}
 			}

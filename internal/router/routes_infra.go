@@ -196,29 +196,55 @@ func RegisterMCPServiceRoutes(
 		mcpServices.DELETE("/:id/oauth/token", g.Viewer(), oauthHandler.Revoke)
 	}
 
-	// /agent tool-approval + OAuth resolution are interactive human flows;
-	// not declared for API keys (default-deny).
+	// /agent 的审批 / 提示 / 授权解析接口不在这里注册：它们与 MCP 无关（本机沙箱审批、
+	// ask_user、grants 都要用），已拆到 RegisterAgentApprovalRoutes 并无条件注册。
+
+}
+
+// RegisterAgentApprovalRoutes registers the interactive human-in-the-loop
+// endpoints the agent runtime pauses on: host-sandbox approvals (delete /
+// denied / file-write), ask_user style prompts, secure credential forms and
+// the caller's remembered approvals.
+//
+// OEM: these used to live inside RegisterMCPServiceRoutes, so with MCP cut
+// (FeatCutMCP = true) the whole group disappeared and every「允许一次 / 拒绝」
+// click ended in Gin's bare `404 page not found` — the approval card could not
+// be answered at all. They are not MCP-specific, so they are registered
+// unconditionally here; only the MCP OAuth resolutions stay MCP-gated.
+func RegisterAgentApprovalRoutes(
+	r *gin.RouterGroup,
+	mcpHandler *handler.MCPServiceHandler,
+	oauthHandler *handler.MCPOAuthHandler,
+	g *rbacGuards,
+) {
+	// 审批 / 提示 / grants 的方法挂在 MCPServiceHandler 上（历史上它们是随 MCP
+	// 一起写的），但语义与本机沙箱审批、ask_user 相关，MCP 关掉也必须有。
+	if mcpHandler == nil {
+		return
+	}
+	// Not declared for API keys (default-deny): interactive flows.
 	agentTool := r.Group("/agent")
 	{
 		// Resolving a pending tool-approval is gated to tenant members
-		// (Viewer+). The approval card surfaces inside an agent chat the
-		// caller initiated — restricting it to Admin+ blocks the only
-		// people who actually have context to approve, so the gate is
-		// kept at "anyone in the tenant" instead.
-		agentTool.POST("/tool-approvals/:pending_id", g.Viewer(), handler.ResolveToolApproval)
+		// (Viewer+): the approval card only shows up inside a chat the caller
+		// started, so Admin+ would block the only people with context.
+		agentTool.POST("/tool-approvals/:pending_id", g.Viewer(), mcpHandler.ResolveToolApproval)
 		// Answer any user-answerable prompt (ask_user, tool approval); same gating.
-		agentTool.POST("/prompts/:prompt_id", g.Viewer(), handler.ResolveAgentPrompt)
+		agentTool.POST("/prompts/:prompt_id", g.Viewer(), mcpHandler.ResolveAgentPrompt)
 		// Secure credential forms are answered only here, never through
 		// /prompts: the body carries values that must not reach the prompt row.
-		agentTool.POST("/secure-forms/:prompt_id", g.Viewer(), handler.SubmitSecureForm)
-		// Resume an agent run paused on an in-conversation MCP OAuth prompt.
-		// Same tenant-member (Viewer+) gating rationale as tool-approvals.
-		agentTool.POST("/mcp-oauth-resolutions/:pending_id", g.Viewer(), oauthHandler.ResolveMCPOAuth)
-		agentTool.POST("/mcp-oauth-resolutions/:pending_id/cancel", g.Viewer(), oauthHandler.CancelMCPOAuth)
+		agentTool.POST("/secure-forms/:prompt_id", g.Viewer(), mcpHandler.SubmitSecureForm)
 		// The caller's own remembered approvals; same gating.
-		agentTool.GET("/grants", g.Viewer(), handler.ListAgentGrants)
-		agentTool.DELETE("/grants/:id", g.Viewer(), handler.RevokeAgentGrant)
+		agentTool.GET("/grants", g.Viewer(), mcpHandler.ListAgentGrants)
+		agentTool.DELETE("/grants/:id", g.Viewer(), mcpHandler.RevokeAgentGrant)
 	}
+
+	// MCP OAuth prompt resolution only exists when MCP itself is wired up.
+	if oauthHandler == nil {
+		return
+	}
+	agentTool.POST("/mcp-oauth-resolutions/:pending_id", g.Viewer(), oauthHandler.ResolveMCPOAuth)
+	agentTool.POST("/mcp-oauth-resolutions/:pending_id/cancel", g.Viewer(), oauthHandler.CancelMCPOAuth)
 }
 
 // RegisterWebSearchRoutes registers web search routes

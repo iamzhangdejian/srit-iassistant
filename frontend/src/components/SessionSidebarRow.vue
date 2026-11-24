@@ -33,14 +33,18 @@
       <span v-else-if="item.parent_session_id" class="session-row-badge session-fork-indicator" role="img" aria-label="由其他会话分叉而来">
         <t-icon name="git-branch" class="submenu_fork_icon" />
       </span>
-      <t-popup v-if="!batchMode" v-model:visible="menuOpen" :overlay-class-name="menuOverlayClass" trigger="click" destroy-on-close
-        placement="bottom-right" @visible-change="onMenuVisibleChange">
-        <button ref="menuTrigger" type="button" class="menu-more-wrap" :aria-label="t('chatHeader.moreActions')" aria-haspopup="menu" :aria-expanded="menuOpen"
-          @keydown.esc="dismissMenu" @click.stop>
-          <t-icon name="ellipsis" class="menu-more" />
-        </button>
-        <template #content>
-          <div class="card-menu" @click.stop @keydown.esc="dismissMenu">
+      <button v-if="!batchMode" ref="menuTrigger" type="button" class="menu-more-wrap" :aria-label="t('chatHeader.moreActions')" aria-haspopup="menu"
+        :aria-expanded="menuOpen" @keydown.esc="dismissMenu" @click.stop="onTriggerClick">
+        <t-icon name="ellipsis" class="menu-more" />
+      </button>
+      <!--
+        菜单不再用 t-popup：Wails 的 WKWebView 里 t-popup 的 trigger 判定会把「点内容」
+        误当成「再点触发器」而提前关闭浮层，导致「删除记录 → 确认」点不到。
+        改为 Teleport 到 body 自绘定位，状态完全由 menuOpen 控制。
+      -->
+      <Teleport to="body">
+        <div v-if="menuOpen && !batchMode" ref="menuPanel" class="session-action-menu-float"
+          :class="{ 'is-confirm': menuMode !== 'menu' }" :style="menuStyle" @click.stop @keydown.esc="dismissMenu">
             <template v-if="menuMode === 'menu'">
               <template v-for="(option, index) in menuOptions" :key="option.value">
                 <div v-if="shouldShowDividerBefore(option.value, index)" class="session-action-menu__divider" />
@@ -69,14 +73,13 @@
               </div>
             </div>
           </div>
-        </template>
-      </t-popup>
+      </Teleport>
     </div>
   </div>
 </template>
 
 <script setup lang="ts">
-import { computed, nextTick, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { normalizeSessionTitleDraft, SESSION_TITLE_MAX_LENGTH } from './sessionTitleEdit'
 import { useSessionTitleMotion } from '@/composables/useSessionTitleMotion'
@@ -115,6 +118,31 @@ const { t } = useI18n()
 
 const menuOpen = ref(false)
 const menuTrigger = ref<HTMLButtonElement | null>(null)
+const menuPanel = ref<HTMLElement | null>(null)
+// 浮层定位：贴住触发器右下角，空间不够时向上翻，并左右夹紧在视口内。
+// 确认态比菜单态宽（250 vs 200），定位时按当前宽度算，避免确认框被裁掉。
+const MENU_WIDTH = 200
+const CONFIRM_WIDTH = 250
+const currentMenuWidth = computed(() => (menuMode.value === 'menu' ? MENU_WIDTH : CONFIRM_WIDTH))
+const menuStyle = ref<Record<string, string>>({})
+
+const positionMenu = (): void => {
+  const trigger = menuTrigger.value
+  if (!trigger) return
+  const rect = trigger.getBoundingClientRect()
+  const panelHeight = menuPanel.value?.offsetHeight ?? 160
+  const gap = 4
+  const width = currentMenuWidth.value
+  const left = Math.max(8, Math.min(rect.right - width, window.innerWidth - width - 8))
+  const below = window.innerHeight - rect.bottom
+  const openUp = below < panelHeight + gap && rect.top > panelHeight + gap
+  const top = openUp ? rect.top - panelHeight - gap : rect.bottom + gap
+  menuStyle.value = {
+    left: `${Math.round(left)}px`,
+    top: `${Math.round(Math.max(8, top))}px`,
+    width: `${width}px`,
+  }
+}
 const menuMode = ref<MenuMode>('menu')
 const titleEditing = ref(false)
 const titleDraft = ref('')
@@ -125,11 +153,6 @@ useSessionTitleMotion(titleTextRef, () => props.item.id, () => props.item.title)
 const showUnread = computed(() => Boolean(props.unread) && !props.running && props.activePath !== props.item.path)
 const hasBadge = computed(() => Boolean(props.running || showUnread.value || props.item.parent_session_id))
 
-const menuOverlayClass = computed(() => (
-  menuMode.value === 'menu'
-    ? 'card-more session-action-menu-popup'
-    : 'card-more session-action-menu-popup is-confirm'
-))
 
 /**
  * API/渠道会话的 owner 是合成主体（api_external_user:<tenant>:<EMP_ID> /
@@ -167,6 +190,55 @@ function dismissMenu(event: KeyboardEvent): void {
 const onMenuVisibleChange = (visible: boolean): void => {
   if (!visible) menuMode.value = 'menu'
 }
+
+// popup 改为 trigger="manual" 后需要自己处理触发器点击：
+// 之前用 trigger="click" 时，WKWebView 里点击弹层内容会先被 trigger 逻辑判成
+// 「再次点击触发器」而关闭弹层，导致「删除记录」的确认按钮点不到、请求发不出去。
+const onTriggerClick = (): void => {
+  if (menuOpen.value) {
+    menuOpen.value = false
+    menuMode.value = 'menu'
+    return
+  }
+  menuMode.value = 'menu'
+  menuOpen.value = true
+  void nextTick(() => {
+    positionMenu()
+    // 面板高度要等渲染后才知道，下一拍再校正一次，避免首帧按默认高度算错上下翻转。
+    void nextTick(positionMenu)
+  })
+}
+
+// trigger="manual" 下失焦不会自动收起，用文档级点击兜底：
+// 点击的目标既不在弹层内容里、也不在触发器上，就视为点空白关菜单。
+const handleDocumentClick = (event: MouseEvent): void => {
+  if (!menuOpen.value) return
+  const target = event.target as Node | null
+  if (!target) return
+  if (menuTrigger.value?.contains(target)) return
+  if (menuPanel.value?.contains(target)) return
+  menuOpen.value = false
+  menuMode.value = 'menu'
+}
+
+// 浮层是 fixed 定位，侧栏一旦滚动或窗口缩放就会与触发器错位，直接收起最省事。
+const closeOnViewportChange = (): void => {
+  if (!menuOpen.value) return
+  menuOpen.value = false
+  menuMode.value = 'menu'
+}
+
+onMounted(() => {
+  document.addEventListener('mousedown', handleDocumentClick, true)
+  window.addEventListener('resize', closeOnViewportChange)
+  window.addEventListener('scroll', closeOnViewportChange, true)
+})
+
+onBeforeUnmount(() => {
+  document.removeEventListener('mousedown', handleDocumentClick, true)
+  window.removeEventListener('resize', closeOnViewportChange)
+  window.removeEventListener('scroll', closeOnViewportChange, true)
+})
 
 const backToMenu = (): void => {
   menuMode.value = 'menu'
@@ -209,12 +281,10 @@ const handleMenuClick = (option: SessionMenuOption): void => {
     startTitleEdit()
     return
   }
-  if (option.value === 'clearMessages') {
-    menuMode.value = 'clear'
-    return
-  }
-  if (option.value === 'delete') {
-    menuMode.value = 'delete'
+  if (option.value === 'clearMessages' || option.value === 'delete') {
+    menuMode.value = option.value === 'clearMessages' ? 'clear' : 'delete'
+    // 确认态更宽，换态后要按新宽度重新夹紧到视口内。
+    void nextTick(positionMenu)
     return
   }
   menuOpen.value = false
@@ -224,9 +294,11 @@ const handleMenuClick = (option: SessionMenuOption): void => {
 
 const confirmDangerAction = (): void => {
   const value = menuMode.value === 'clear' ? 'clearMessages' : 'delete'
+  // 先派发再关弹层：menuOpen=false 会让 t-popup 卸载内容，把 emit 放在它后面时
+  // 部分场景下父组件的监听已经随卸载失效，表现就是「确认框点了没反应」。
+  emit('menu-click', { value })
   menuOpen.value = false
   menuMode.value = 'menu'
-  emit('menu-click', { value })
 }
 </script>
 
@@ -423,13 +495,57 @@ const confirmDangerAction = (): void => {
 </style>
 
 <style lang="less">
-.card-more.session-action-menu-popup {
-  z-index: 3000 !important;
+/* 浮层由组件自行 Teleport 到 body，样式必须写成非 scoped。 */
+.session-action-menu-float {
+  position: fixed;
+  z-index: 3000;
+  box-sizing: border-box;
+  border: 0.5px solid var(--td-component-stroke);
+  border-radius: var(--app-radius-md, 6px);
+  background: var(--td-bg-color-container);
+  box-shadow: var(--td-shadow-2, 0 6px 20px rgba(0, 0, 0, 0.12));
+  overflow: hidden;
 
-  &.is-confirm .t-popup__content {
-    padding: 12px !important;
-    width: 260px !important;
-    min-width: 260px !important;
+  /* 复用 .card-more 的菜单项样式，但内部图标/文字节点不受 scoped 限制。 */
+  &.is-confirm {
+    padding: 12px;
+  }
+
+  .card-menu {
+    display: flex;
+    flex-direction: column;
+    gap: 1px;
+    padding: 4px;
+  }
+
+  .card-menu-item {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 6px 10px;
+    border: 0;
+    border-radius: var(--app-radius-xs, 4px);
+    background: transparent;
+    color: var(--td-text-color-primary);
+    font-family: var(--app-font-family);
+    font-size: var(--app-text-base);
+    font-weight: 400;
+    line-height: 20px;
+    text-align: left;
+    white-space: nowrap;
+    cursor: pointer;
+
+    &:hover {
+      background: var(--td-bg-color-container-hover);
+    }
+
+    &.danger {
+      color: var(--td-error-color-6);
+
+      &:hover {
+        background: var(--td-error-color-1);
+      }
+    }
   }
 }
 

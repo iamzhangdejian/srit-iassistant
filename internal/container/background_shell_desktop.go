@@ -6,6 +6,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -41,12 +42,20 @@ func newShellJobService(
 	if !ok || provider.LocalSandboxService() == nil {
 		return jobs, nil
 	}
-	home, err := os.UserHomeDir()
-	if err != nil {
-		return nil, err
+	// 便携模式与桌面默认路径二选一：WK_PORTABLE_DIR 下所有可写状态集中存放，
+	// 家目录不可写的环境（沙箱、企业管控）也能正常启动。
+	var jobsDir string
+	if portable := strings.TrimSpace(os.Getenv("WK_PORTABLE_DIR")); portable != "" {
+		jobsDir = filepath.Join(portable, "jobs")
+	} else {
+		home, err := os.UserHomeDir()
+		if err != nil {
+			return nil, err
+		}
+		jobsDir = filepath.Join(home, ".weknora", "jobs")
 	}
 	local, err := service.NewLocalShellJobService(
-		provider.LocalSandboxService(), bg, events, filepath.Join(home, ".weknora", "jobs"),
+		provider.LocalSandboxService(), bg, events, jobsDir,
 	)
 	if err != nil {
 		return nil, err

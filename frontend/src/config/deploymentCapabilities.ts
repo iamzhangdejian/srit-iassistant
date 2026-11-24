@@ -14,7 +14,11 @@ export const DEPLOYMENT_CAPABILITY_KEYS = [
   'settings.sandbox.host',
   'settings.sandbox.remote',
   'settings.sandbox.user_allocation',
+  'integrations.browserskill',
+  'settings.projectdir',
 ] as const
+// settings.projectdir 是「项目目录（原生选择框）」能力，与 host 沙箱解耦：
+// Windows 暂时没有沙箱后端，但项目、项目文件与会话归属仍要可用。
 
 export type DeploymentCapabilityKey = typeof DEPLOYMENT_CAPABILITY_KEYS[number]
 
@@ -53,6 +57,12 @@ export function isDeploymentCapabilitySupported(
     || key === 'settings.sandbox.host'
     || key === 'settings.sandbox.remote'
     || key === 'settings.sandbox.user_allocation'
+    // Browser skill: OEM build cuts /me/browser entirely, so a missed probe
+    // must not leave the connection poller running against a 404.
+    || key === 'integrations.browserskill'
+    // Project directories come from a native picker this deployment either
+    // injects or does not; a missed probe must not show an unusable entry.
+    || key === 'settings.projectdir'
   ) {
     return capabilities[key]?.supported === true
   }

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/Tencent/WeKnora/internal/localsandbox"
@@ -247,6 +248,115 @@ func (a *Adapter) ListSessionFiles(
 		return nil, err
 	}
 	logger.Debugf(ctx, "[LocalSandbox] listed session=%s path=%s entries=%d", sessionID, resolved, len(out))
+	return out, nil
+}
+
+// maxFilesWrittenSince caps one post-command rescan. The scan is bounded by
+// the command start time rather than by the project size, so the limit only
+// bites when a single command touches thousands of files, and then keeping
+// the first ones is still far better than the truncated listing it replaces.
+const maxFilesWrittenSince = 2000
+
+// hostRescanSkipDirs are never descended into by FilesWrittenSince. They hold
+// dependency trees, VCS objects and tool caches: their contents are never
+// deliverables, and walking them would dominate the scan on a real project.
+var hostRescanSkipDirs = map[string]struct{}{
+	".git":         {},
+	"node_modules": {},
+	".venv":        {},
+	"venv":         {},
+	"__pycache__":  {},
+	".next":        {},
+	".cache":       {},
+	".idea":        {},
+	".duckdb":      {},
+	"target":       {},
+	"Library":      {},
+}
+
+// hostRescanSkipsDir reports whether a directory name is dependency/tooling
+// state rather than workspace content.
+//
+// The suffix rule matters for virtual environments, which users name anything:
+// "pdf_venv", "venv-ml", ".env". A pip install inside the command window would
+// otherwise report thousands of site-packages files as this turn's output.
+func hostRescanSkipsDir(name string) bool {
+	if _, skip := hostRescanSkipDirs[name]; skip {
+		return true
+	}
+	lower := strings.ToLower(name)
+	return strings.HasSuffix(lower, "venv") ||
+		strings.HasSuffix(lower, "env") && strings.HasPrefix(lower, ".") ||
+		lower == "site-packages" ||
+		strings.HasSuffix(lower, ".dist-info") ||
+		strings.HasSuffix(lower, ".egg-info") ||
+		lower == ".pytest_cache"
+}
+
+// FilesWrittenSince lists regular files under dir modified at or after since.
+//
+// The host backend runs the workspace inside the user's project, where a shell
+// command can create anything (a script that renders a PDF, for example). The
+// file tools report their writes explicitly, but a command's output cannot be
+// known in advance, and listing the project to diff it before/after would both
+// miss files past the listing cap and walk the whole tree twice. This scan is
+// the shell_exec answer: one bounded pass, filtered by modification time.
+func (a *Adapter) FilesWrittenSince(
+	ctx context.Context, sessionID, dir string, since time.Time,
+) ([]sandbox.RemoteDirEntry, error) {
+	guard, ws, err := a.guard(ctx, sessionID)
+	if err != nil {
+		return nil, err
+	}
+	resolved, err := guard.CheckRead(absoluteIn(ws.Root, dir))
+	if err != nil {
+		logger.Warnf(ctx, "[LocalSandbox] scan denied session=%s path=%q: %v", sessionID, dir, err)
+		return nil, err
+	}
+	var out []sandbox.RemoteDirEntry
+	truncated := false
+	err = filepath.WalkDir(resolved, func(p string, d os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			// A directory we cannot read must not abort the scan: the file we
+			// are looking for may be in a sibling subtree.
+			return nil
+		}
+		if d.IsDir() {
+			if hostRescanSkipsDir(d.Name()) {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		info, infoErr := d.Info()
+		if infoErr != nil || !info.Mode().IsRegular() {
+			return nil
+		}
+		if info.ModTime().Before(since) {
+			return nil
+		}
+		if len(out) >= maxFilesWrittenSince {
+			truncated = true
+			return filepath.SkipAll
+		}
+		out = append(out, sandbox.RemoteDirEntry{
+			Name:    d.Name(),
+			Path:    p,
+			Type:    sandbox.RemoteEntryFile,
+			Size:    info.Size(),
+			ModTime: info.ModTime(),
+		})
+		return nil
+	})
+	if err != nil {
+		logger.Warnf(ctx, "[LocalSandbox] scan session=%s path=%s: %v", sessionID, resolved, err)
+		return nil, err
+	}
+	if truncated {
+		logger.Warnf(ctx, "[LocalSandbox] scan truncated session=%s path=%s limit=%d",
+			sessionID, resolved, maxFilesWrittenSince)
+	}
+	logger.Debugf(ctx, "[LocalSandbox] scanned session=%s path=%s since=%s entries=%d",
+		sessionID, resolved, since.Format(time.RFC3339Nano), len(out))
 	return out, nil
 }
 

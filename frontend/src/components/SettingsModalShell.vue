@@ -1,18 +1,26 @@
 <template>
-  <Teleport to="body">
+  <!--
+    Teleport 开关说明（推挤模式的关键）：
+      • modal  —— 传送到 body，脱离布局树，作为全屏浮层（原行为）
+      • drawer —— 不传送，原地渲染成父容器（.main）的一个 flex 子项，
+                  占掉真实宽度，主内容区被挤窄但完全可见（推挤而非遮挡）
+    这是复用 AssistantPanel 已验证的模式（其 docked 态同样禁用 Teleport）。
+  -->
+  <Teleport to="body" :disabled="variant === 'drawer'">
     <Transition name="settings-modal-shell">
-      <div v-if="visible" class="settings-modal-shell settings-overlay" :class="overlayClass" :style="{ zIndex }"
-        @click.self="emit('close')">
+      <!--
+        variant 决定容器形态（2024 改造）：
+          • 'modal'  —— 默认，居中浮层 + 半透明遮罩，覆盖整个页面
+          • 'drawer' —— 右侧抽屉，贴右侧边缘、不遮挡左侧导航与会话列表
+        仅替换外层容器，内部 settings-container（左侧分区导航 + 右侧内容）
+        与所有业务逻辑、路由、权限判断完全不变。
+      -->
+      <div v-if="visible" class="settings-modal-shell" :class="[variant === 'modal' ? 'settings-overlay' : 'settings-drawer-host', overlayClass]"
+        :style="{ zIndex }" :data-variant="variant" @click.self="emit('close')">
         <div class="settings-modal" role="dialog" aria-modal="true" :aria-label="title">
           <div v-if="loading" class="editor-initializing" role="status" :aria-label="$t('common.loading')">
             <t-loading size="medium" :text="$t('common.loading')" />
           </div>
-
-          <button class="close-btn" type="button" @click="emit('close')" :aria-label="$t('common.close')">
-            <svg width="20" height="20" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
-              <path d="M15 5L5 15M5 5L15 15" stroke="currentColor" stroke-width="2" stroke-linecap="round" />
-            </svg>
-          </button>
 
           <div class="settings-container">
             <aside class="settings-sidebar">
@@ -39,6 +47,17 @@
             </aside>
 
             <div class="settings-content">
+              <!--
+                关闭按钮放在内容列内部（而不是面板右上角）。
+                原因：面板在 drawer 形态下撑满内容区（可达 1180px），
+                按钮若定位在面板右上角，会离正文 700px 远。
+                放在内容列里则始终贴着正文右缘，宽屏窄屏都顺手。
+              -->
+              <button class="close-btn" type="button" @click="emit('close')" :aria-label="$t('common.close')">
+                <svg width="20" height="20" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+                  <path d="M15 5L5 15M5 5L15 15" stroke="currentColor" stroke-width="2" stroke-linecap="round" />
+                </svg>
+              </button>
               <div class="settings-body">
                 <slot />
               </div>
@@ -95,6 +114,12 @@ withDefaults(
     overlayClass?: string
     navGuide?: string
     navItemGuidePrefix?: string
+    /**
+     * 容器形态。
+     * 'modal'  居中浮层（原行为，默认值保持兼容 —— 其它几个调用方不受影响）
+     * 'drawer' 右侧抽屉，内嵌在页面里，不遮挡左侧导航
+     */
+    variant?: 'modal' | 'drawer'
   }>(),
   {
     modelValue: '',
@@ -104,6 +129,7 @@ withDefaults(
     overlayClass: '',
     navGuide: '',
     navItemGuidePrefix: '',
+    variant: 'modal',
   },
 )
 
@@ -133,6 +159,130 @@ function showBadge(item: SettingsModalNavItem): boolean {
   overscroll-behavior: none;
 }
 
+/*
+ * 设置页形态（drawer = 内嵌页）：设置是**页面**，不是叠加在对话上的面板。
+ *
+ * 路由点击「模型管理」→ /platform/settings，主内容区展示设置页。
+ * 因此这里不设固定宽度、不设遮罩，直接撑满父级（.platform-route-outlet 之外的
+ * 剩余区域），与侧栏并排，视觉上就是一个带内部分区导航的普通页面。
+ *
+ * 与浮层的本质区别：
+ *   • 无 position: fixed、无遮罩 —— 它占真实的布局空间
+ *   • 无圆角、无阴影 —— 它是页面而非卡片
+ *   • 左侧栏始终可见可点，可随时切回其他模块
+ */
+.settings-modal-shell.settings-drawer-host {
+  position: relative;
+  flex: 1 1 auto;
+  width: 100%;
+  min-width: 0;
+  height: 100%;
+  display: flex;
+  align-items: stretch;
+  overflow: hidden;
+  background: var(--td-bg-color-container);
+
+  /*
+   * 注意：Settings.vue 尾部有一段非 scoped 样式
+   *   .settings-modal-shell.all-settings-overlay > .settings-modal {
+   *     max-width: 1280px; height: 900px;
+   *   }
+   * 它的选择器权重（0,3,0）高于 .settings-drawer-host .settings-modal（0,2,0），
+   * 会在 1920 这类大屏上把设置页卡死在 1280px，右侧留出大片空白。
+   * 因此这里用 .settings-drawer-host > .settings-modal（0,2,0 + 子选择器）
+   * 无法取胜，必须显式加 !important 覆盖。
+   */
+  > .settings-modal {
+    position: relative;
+    width: 100%;
+    max-width: none !important;
+    height: 100% !important;
+    max-height: 100%;
+    border-radius: 0;
+    border-left: 1px solid var(--td-component-stroke);
+    box-shadow: none;
+  }
+
+  /*
+   * 窄屏（< 1100px）导航横排。
+   *
+   * 分区导航原本是固定 208px 的左侧竖栏，窄屏下会把内容列挤到 400px 以内，
+   * 模型卡片、成员表格这类多列内容基本没法看。
+   * 窄屏时改为顶部横向条：分组标题隐藏（横排里没有意义），
+   * 导航项按 flex-wrap 自然换行，标题行跟随吸顶。
+   */
+  @media (max-width: 1100px) {
+    .settings-container {
+      flex-direction: column;
+    }
+
+    .settings-sidebar {
+      width: 100%;
+      // 内容可能换行成两行，高度交给内容决定，不要写死
+      max-height: 40vh;
+      border-right: none;
+      border-bottom: 1px solid var(--td-component-stroke);
+    }
+
+    .sidebar-header {
+      padding: 12px 14px 8px;
+      border-bottom: none;
+    }
+
+    .settings-nav {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 4px;
+      padding: 0 10px 10px;
+      // 横排时只可能横向溢出，纵向不再需要滚动
+      overflow-x: auto;
+      overflow-y: hidden;
+    }
+
+    // 横排下分组标题没有视觉意义，直接隐藏
+    .nav-group-title {
+      display: none;
+    }
+
+    .nav-item {
+      margin-bottom: 0;
+      padding: 5px 10px;
+      flex: 0 0 auto;
+      border: 1px solid transparent;
+      border-radius: var(--app-radius-pill);
+
+      &.active {
+        border-color: var(--td-brand-color-light);
+      }
+    }
+
+    .nav-label {
+      flex: 0 1 auto;
+    }
+
+    .nav-icon {
+      margin-right: 6px;
+    }
+
+    // 窄屏时内容区不再需要限宽（本身就窄），取消居中留白
+    .settings-content {
+      max-width: 100%;
+    }
+
+    // 关闭按钮仍在右上角，但横排导航已占满顶部，
+    // 内容区上方留白改由 .settings-body 自己控制
+  }
+
+  // 全局防横向滚动：任何子元素意外超宽都不应把整页推出可滚动区
+  .settings-container,
+  .settings-content,
+  .settings-body {
+    max-width: 100%;
+    box-sizing: border-box;
+  }
+}
+
 .settings-modal-shell {
   .settings-modal {
     position: relative;
@@ -160,6 +310,17 @@ function showBadge(item: SettingsModalNavItem): boolean {
     background: var(--td-bg-color-container);
   }
 
+  /*
+   * 关闭按钮定位。
+   *
+   * 原先 right:16px 是相对整个面板定位的 —— 面板撑满内容区后（宽 1180px），
+   * 按钮离右侧正文有 700px 远，鼠标要横穿整页才点得到。
+   *
+   * 现在改为跟随「内容列」的右缘：内容列 max-width 860px 且居中，
+   * 右缘位置 = 面板宽的一半 + 430px。用容器查询变量算不出来，
+   * 因此直接在 drawer 形态下改为相对 .settings-content 定位，
+   * 由它自己承担右上角位置（.settings-content 是 position: relative 的定位上下文）。
+   */
   .close-btn {
     position: absolute;
     top: 16px;
@@ -314,14 +475,39 @@ function showBadge(item: SettingsModalNavItem): boolean {
     }
   }
 
+  /*
+   * 内容区：限宽 + 居中。
+   *
+   * 问题：设置页撑满整个内容区后（drawer 形态下宽达 1180px），
+   * 内部组件多数是 width:100%，模型卡片网格会把卡片拉到 320px 以上的
+   * 大块区域，右侧出现大片空白，读起来很散。
+   *
+   * 做法：给内容列一个阅读友好的上限（860px）并水平居中。
+   * 用 margin-inline:auto 而不是 justify-content:center —— 后者在内容
+   * 超出时会导致左侧被裁掉、无法滚动到，前者超宽时自动退化为靠左填满。
+   */
+  /*
+   * 内容区：铺满可用宽度，不做 max-width 限宽。
+   *
+   * 曾经限宽 860px 居中，是为了控制正文行长；但设置页里的主体是
+   * 卡片网格、表格、资源列表这类"宽度越多越好"的内容，
+   * 限宽反而造成右侧大片空白。现在改为跟随视口伸缩：
+   *   • flex:1 1 auto + min-width:0  —— 吃掉导航栏之外的全部宽度
+   *   • width:100%                  —— 不依赖父级对齐方式
+   *   • 不设 max-width              —— 大屏也不留空
+   * 可读性由内层 .content-wrapper 的内边距与卡片布局自己把握。
+   */
   .settings-content {
-    flex: 1;
+    flex: 1 1 auto;
     display: flex;
     flex-direction: column;
     min-width: 0;
     min-height: 0;
+    width: 100%;
     overflow: hidden;
     background-color: var(--td-bg-color-container);
+    // 作为关闭按钮的定位上下文（见 .close-btn 注释）
+    position: relative;
   }
 
   // 既是滚动容器，也是 flex 列：消费方的 .content-wrapper 想自己滚动时设 flex:1 + overflow:auto，
@@ -332,6 +518,13 @@ function showBadge(item: SettingsModalNavItem): boolean {
     display: flex;
     flex-direction: column;
     overflow-y: auto;
+    // 关闭按钮在内容列右上角（距右 16px、宽 32px）。
+    // 这里不再用 padding-right 把整列顶窄 48px（会造成整块右侧留白），
+    // 改为只给首个子元素（各设置页的标题区）留避让，正文继续铺满。
+    > :first-child {
+      padding-right: 48px;
+      box-sizing: border-box;
+    }
 
     &::-webkit-scrollbar {
       width: 6px;

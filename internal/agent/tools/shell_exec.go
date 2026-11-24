@@ -619,6 +619,12 @@ func (t *ShellExecTool) Execute(ctx context.Context, args json.RawMessage) (*typ
 	var res *sandbox.ExecuteResult
 	var err error
 	var outputFiles []string
+	// Host backend only: the project root and the instant the command started.
+	// Shell output cannot be predicted, and the file tools already report their
+	// own writes, so the produced files are found by rescanning the root for
+	// entries modified since this timestamp (see FilesWrittenSince).
+	var hostRoot string
+	var hostStarted time.Time
 	if executor, ok := t.executor.(interface {
 		ExecShellCommandWithOutputSnapshot(
 			context.Context, string, string, sandbox.ShellExecOptions, string,
@@ -636,13 +642,29 @@ func (t *ShellExecTool) Execute(ctx context.Context, args json.RawMessage) (*typ
 	} else {
 		// Keep support for executors without the combined operation (including
 		// install mode); production session managers use one handle above.
-		before, inspected := sandboxOutputSnapshot(ctx, t.executor, sessionID, layoutOutputDir(layout))
+		//
+		// The host backend has no separate output tree: its layout's OutputDir is
+		// the project root itself, so snapshotting "the output directory" would
+		// walk the user's whole project twice and still be capped. Host writes are
+		// resolved after the command instead, by modification time.
+		isHost := layout.IsHost() && layout.Root != ""
+		var before map[string]sandbox.RemoteDirEntry
+		inspected := false
+		if isHost {
+			hostRoot = layout.Root
+			hostStarted = time.Now()
+		} else {
+			before, inspected = sandboxOutputSnapshot(ctx, t.executor, sessionID, layoutOutputDir(layout))
+		}
 		res, err = t.executor.ExecShellCommand(execCtx, sessionID, execCommand, workDir, timeout, env)
 		if err == nil && res != nil && inspected {
 			if after, ok := sandboxOutputSnapshot(ctx, t.executor, sessionID, layoutOutputDir(layout)); ok {
 				outputFiles = changedOutputLinks(layoutOutputDir(layout), before, after)
 			}
 		}
+	}
+	if hostRoot != "" && err == nil && res != nil {
+		noteHostShellWrites(ctx, sessionID, hostRoot, hostStarted, t.executor)
 	}
 	finishOutput()
 	noteSandboxMutation()

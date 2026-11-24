@@ -129,7 +129,7 @@ func provideHostSandboxManager(
 			"[sandbox] host backend disabled: cannot resolve home directory: %v", err)
 		return out
 	}
-	skillsRoot := defaultHostSkillsRoot(home)
+	skillsRoot := DefaultHostSkillsRoot(home)
 	parts := buildHostSandbox(hostSandboxDeps{
 		newBackend:  localsandbox.NewBackend,
 		homeDir:     home,
@@ -166,13 +166,9 @@ func defaultHostSessionRoot(homeDir string) string {
 	return filepath.Join(homeDir, ".weknora", "sessions")
 }
 
-func defaultHostSkillsRoot(homeDir string) string {
-	return filepath.Join(homeDir, ".weknora", "skills")
-}
-
 func hostAppDataDir(home string) string {
 	if dir, err := os.UserConfigDir(); err == nil && strings.TrimSpace(dir) != "" {
-		return filepath.Join(dir, "WeKnora Lite")
+		return filepath.Join(dir, "国研智研体")
 	}
-	return filepath.Join(home, "Library", "Application Support", "WeKnora Lite")
+	return filepath.Join(home, "Library", "Application Support", "国研智研体")
 }

@@ -17,11 +17,19 @@ import (
 // The JWT secret is never that AES key: a leaked session secret must not
 // decrypt stored credentials.
 func ensureDesktopSigningKey() error {
-	dir, err := os.UserConfigDir()
+	// 顺序与其它可写状态保持一致：便携目录 > XDG_CONFIG_HOME > 系统默认。
+	// 便携模式下所有状态都进同一个目录，便于整体备份、迁移和排障。
+	if portable := strings.TrimSpace(os.Getenv("WK_PORTABLE_DIR")); portable != "" {
+		return ensureDesktopSigningKeyInDir(portable)
+	}
+	// 与 desktopConfigDir() 保持一致：Darwin 的 os.UserConfigDir() 会忽略
+	// XDG_CONFIG_HOME，若不先看它，便携模式就会仍然去写
+	// ~/Library/Application Support，在该目录不可写时启动即 panic。
+	dir, err := desktopConfigDir()
 	if err != nil {
 		return err
 	}
-	return ensureDesktopSigningKeyInDir(filepath.Join(dir, "WeKnora Lite"))
+	return ensureDesktopSigningKeyInDir(filepath.Join(dir, "国研智研体"))
 }
 
 func ensureDesktopSigningKeyInDir(dir string) error {

@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
@@ -25,9 +26,23 @@ import (
 // selects the test workspace. The async tool never executes through this stub.
 type shellJobToolExecutor struct{ tools.SandboxCommandExecutor }
 
+// stderrWritable 判断当前沙箱是否允许向 /dev/stderr 写。
+//
+// 沙箱化的 CI 与部分受限运行环境会拒绝这个重定向（tee: /dev/stderr:
+// Operation not permitted），此时 `tee /dev/stderr` 这条用例必然失败，
+// 而失败原因与被测逻辑无关。先探测再决定是否跳过，避免把环境限制误报成回归。
+func stderrWritable(t *testing.T) bool {
+	t.Helper()
+	cmd := exec.Command("/bin/sh", "-c", "echo probe > /dev/stderr")
+	return cmd.Run() == nil
+}
+
 func TestLocalShellJobLargeStdinPreservesResultJSON(t *testing.T) {
 	for _, command := range []string{"cat", "tee /dev/stderr #" + strings.Repeat("\x01", 8192-17)} {
 		t.Run(map[bool]string{false: "stdin", true: "escaped-command"}[len(command) > 3], func(t *testing.T) {
+			if strings.Contains(command, "/dev/stderr") && !stderrWritable(t) {
+				t.Skip("sanity check: this sandbox forbids writing to /dev/stderr")
+			}
 			root := t.TempDir()
 			bg := NewBackgroundWork(background.NewMemoryActivityRegistry(nil), background.NewMemoryNoticeInbox(nil))
 			svc, err := newLocalShellJobService(drainingShellStarter{root: root}, bg, nil,

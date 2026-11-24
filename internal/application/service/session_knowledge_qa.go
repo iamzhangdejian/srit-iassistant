@@ -9,6 +9,7 @@ import (
 	"github.com/Tencent/WeKnora/internal/agent/tools"
 	chatpipeline "github.com/Tencent/WeKnora/internal/application/service/chat_pipeline"
 	"github.com/Tencent/WeKnora/internal/common"
+	"github.com/Tencent/WeKnora/internal/config"
 	apperrors "github.com/Tencent/WeKnora/internal/errors"
 	"github.com/Tencent/WeKnora/internal/event"
 	"github.com/Tencent/WeKnora/internal/logger"
@@ -83,7 +84,7 @@ func (s *sessionService) KnowledgeQA(
 		ContextTemplate:     s.cfg.Conversation.Summary.ContextTemplate,
 		Temperature:         s.cfg.Conversation.Summary.Temperature,
 		NoMatchPrefix:       s.cfg.Conversation.Summary.NoMatchPrefix,
-		MaxCompletionTokens: s.cfg.Conversation.Summary.MaxCompletionTokens,
+		MaxCompletionTokens: s.resolveAnswerMaxTokens(ctx),
 		Thinking:            s.cfg.Conversation.Summary.Thinking,
 	}
 	fallbackStrategy := types.FallbackStrategy(s.cfg.Conversation.FallbackStrategy)
@@ -173,9 +174,23 @@ func (s *sessionService) KnowledgeQA(
 		},
 	}
 
+	// Determine pipeline based on the effective knowledge retrieval scope and
+	// web search setting. Tag-only mentions leave the raw KB/knowledge ID slices
+	// empty but produce SearchTargets, so the unified targets must participate in
+	// this decision or the request is incorrectly downgraded to pure chat.
+	//
+	// This must be computed BEFORE applying agent overrides: the system prompt
+	// depends on whether retrieval will actually happen. A knowledge-base prompt
+	// ("answer only from the supplied materials, say what is missing otherwise")
+	// applied to a pure-chat turn makes the model refuse ordinary questions such
+	// as "what's the date today" or "write me a poem".
+	hasKB := types.HasKnowledgeRetrievalScope(searchTargets, knowledgeBaseIDs, knowledgeIDs)
+	needsRAG := hasKB || webSearchEnabled
+	chatManage.RetrievalPlanned = needsRAG
+
 	// Apply custom agent overrides (system prompt, temperature, retrieval params,
 	// rewrite, fallback, FAQ strategy, history turns)
-	s.applyAgentOverridesToChatManage(ctx, req.CustomAgent, chatManage)
+	s.applyAgentOverridesToChatManage(ctx, req.CustomAgent, chatManage, needsRAG)
 	applyRequestReasoningEffort(
 		req.ReasoningEffort, &chatManage.SummaryConfig.Thinking, &chatManage.SummaryConfig.ReasoningEffort,
 	)
@@ -192,12 +207,6 @@ func (s *sessionService) KnowledgeQA(
 		ctx = types.ApplyAgentMemoryPreference(ctx, req.CustomAgent.Config.MemoryEnabled)
 	}
 
-	// Determine pipeline based on the effective knowledge retrieval scope and
-	// web search setting. Tag-only mentions leave the raw KB/knowledge ID slices
-	// empty but produce SearchTargets, so the unified targets must participate in
-	// this decision or the request is incorrectly downgraded to pure chat.
-	hasKB := types.HasKnowledgeRetrievalScope(searchTargets, knowledgeBaseIDs, knowledgeIDs)
-	needsRAG := hasKB || webSearchEnabled
 	hasHistory := chatManage.MaxRounds > 0
 
 	var pipeline []types.EventType
@@ -1405,4 +1414,25 @@ func (s *sessionService) resolveWebSearchMaxResults(ctx context.Context, req *ty
 		return types.EffectiveWebSearchConfig(tenantInfo.WebSearchConfig).MaxResults
 	}
 	return types.DefaultWebSearchMaxResults
+}
+
+// resolveAnswerMaxTokens 解析「对话主回答」的输出 token 上限。
+//
+// 取值优先级：
+//  1. 系统设置里的 conversation.max_answer_tokens（运维在界面上实时调整的那一项）
+//  2. 配置文件 config.yaml 的 conversation.max_answer_tokens
+//  3. 内置兜底 config.DefaultAnswerMaxTokens
+//
+// 注意：这里刻意不再读 conversation.summary.max_completion_tokens。
+// 那个字段是后台摘要/画像用的紧凑预算（1024），套到主回答上会把
+// 长报告写到一半截断——这正是它被拆出来的原因。
+func (s *sessionService) resolveAnswerMaxTokens(ctx context.Context) int {
+	fallback := s.cfg.Conversation.MaxAnswerTokens
+	if fallback <= 0 {
+		fallback = config.DefaultAnswerMaxTokens
+	}
+	if v := ResolveIntSetting(ctx, settingKeyMaxAnswerTokens, "", int64(fallback)); v > 0 {
+		return int(v)
+	}
+	return fallback
 }

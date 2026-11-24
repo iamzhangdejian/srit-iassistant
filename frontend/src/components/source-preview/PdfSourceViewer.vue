@@ -14,10 +14,23 @@ type Mark = { left: number; top: number; width: number; height: number; kind: 'b
 
 export type PdfLocateResult = { found: boolean; precise: boolean; page?: number; granularity?: string; reason?: string }
 
+/**
+ * 超大 PDF 的分段来源：pdf.js 只会按需请求它需要的字节区间。
+ *
+ * `totalBytes` 必须是文件的真实长度（由调用方先做一次 0-0 的 Range 探测），
+ * 否则 pdf.js 的交叉引用表定位会算错。
+ */
+export type PdfRangeSource = {
+  totalBytes: number
+  fetchRange: (begin: number, end: number) => Promise<Uint8Array>
+}
+
 const props = defineProps<{
   data: ArrayBuffer | null
   fileName?: string
   locate?: SourceLocateRequest | null
+  /** 给了它就走 Range 分段，此时 `data` 应为 null。 */
+  rangeSource?: PdfRangeSource | null
 }>()
 
 const emit = defineEmits<{
@@ -93,6 +106,66 @@ async function openDocument(data: ArrayBuffer) {
     data: new Uint8Array(data.slice(0)),
     wasmUrl: `${import.meta.env.BASE_URL}pdfjs/wasm/`,
   })
+  loadingTask = task
+  const doc = await task.promise
+  if (disposed) {
+    await task.destroy()
+    return
+  }
+  pdf.value = doc
+  pageCount.value = doc.numPages
+  const first = await doc.getPage(1)
+  const vp = first.getViewport({ scale: 1 })
+  ratios[1] = vp.height / vp.width
+}
+
+/**
+ * 用 pdf.js 的 `PDFDataRangeTransport` 打开文件：只按需拉字节，不把整份读进内存。
+ *
+ * Range 是闭区间，所以传 `${begin}-${end-1}`。pdf.js 保证 `onDataRange` 的 begin
+ * 与请求时一致，并发请求天然能对上号。
+ */
+async function openRangeDocument(source: PdfRangeSource) {
+  const lib = await loadPdfJs()
+  pdfjs = lib
+  if (disposed) return
+  type RangeTransport = {
+    requestDataRange?: (begin: number, end: number) => void
+    onDataRange: (begin: number, chunk: Uint8Array) => void
+    abort: () => void
+  }
+  const Transport = (lib as unknown as {
+    PDFDataRangeTransport: new (
+      length: number,
+      initialData: ArrayBuffer | null,
+      progressiveDone?: boolean,
+    ) => RangeTransport
+  }).PDFDataRangeTransport
+  const transport = new Transport(source.totalBytes, null, false)
+  let failed = false
+  transport.requestDataRange = (begin: number, end: number) => {
+    void source
+      .fetchRange(begin, end)
+      .then((chunk) => {
+        if (disposed || failed) return
+        transport.onDataRange(begin, chunk)
+      })
+      .catch((err) => {
+        if (failed || disposed) return
+        failed = true
+        console.error('PDF range fetch failed:', err)
+        // abort() 让 getDocument 的 promise 以 AbortException 结束，落到 load()
+        // 的 catch 里显示「加载失败」，而不是永远转圈。
+        transport.abort()
+      })
+  }
+  const task = lib.getDocument({
+    range: transport,
+    wasmUrl: `${import.meta.env.BASE_URL}pdfjs/wasm/`,
+    // 只取需要的区间，不要顺手把整份文件拉下来。
+    disableAutoFetch: true,
+    disableStream: true,
+  } as Parameters<typeof lib.getDocument>[0])
   loadingTask = task
   const doc = await task.promise
   if (disposed) {
@@ -384,10 +457,15 @@ watch(
 
 async function load() {
   error.value = ''
-  if (!props.data) return
+  const source = props.rangeSource
+  if (!props.data && !source) return
   loading.value = true
   try {
-    await openDocument(props.data)
+    if (source) {
+      await openRangeDocument(source)
+    } else {
+      await openDocument(props.data as ArrayBuffer)
+    }
     await nextTick()
     containerWidth = scroller.value?.clientWidth ? scroller.value.clientWidth - 24 : 600
     if (props.locate) await applyLocate(props.locate)

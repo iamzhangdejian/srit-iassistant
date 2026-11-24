@@ -110,6 +110,7 @@
                                 :value="session.created_at" />
 
                             <div v-if="session.role == 'user'" class="message-row"
+                                :class="{ 'is-jump-target': jumpedMessageId === session.id }"
                                 :data-message-id="session.id || undefined">
                                 <usermsg :content="session.content" :mentioned_items="session.mentioned_items"
                                     :images="session.images" :attachments="session.attachments" :embeddedMode="embeddedMode"
@@ -127,6 +128,7 @@
                             </div>
                             <div v-if="session.role == 'assistant' && shouldRenderAssistantMessage(session)"
                                 class="message-row"
+                                :class="{ 'is-jump-target': jumpedMessageId === session.id }"
                                 :data-message-id="session.id || undefined">
                                 <botmsg :content="session.content" :session="session" :session-id="session_id"
                                     :user-query="getUserQuery(index)" @scroll-bottom="scrollToBottom"
@@ -218,7 +220,9 @@
         @update:visible="(val) => val ? null : uiStore.closeKBEditor()" @success="handleKBEditorSuccess" />
     <ChatReferencesDrawer />
     <ChatAttachmentPreviewDrawer />
-    <SandboxSidePanel v-if="!embeddedMode" :session-id="session_id"
+    <SandboxSidePanel ref="sandboxPanelRef" v-if="!embeddedMode" :session-id="session_id"
+        :project-dir="projectDir"
+        @project-file-mention="handleProjectFileMention"
         :agent-id="useSettingsStoreInstance.selectedAgentId"
         :agent-source-tenant-id="useSettingsStoreInstance.selectedAgentSourceTenantId"
         :shifted="referencesDrawerVisible"
@@ -236,7 +240,7 @@ import ChildAgentStream from './components/ChildAgentStream.vue';
 import { createChildAgentTabs, childAgentTabsKey, childAgentTaskLookupKey, findChildAgentTask } from '@/composables/useChildAgentTabs';
 import { makeSteerClientId } from '@/utils/steerId';
 import { storeToRefs } from 'pinia';
-import { inject, ref, onMounted, onBeforeMount, onUnmounted, nextTick, watch, reactive, computed, provide } from 'vue';
+import { inject, ref, onMounted, onBeforeMount, onBeforeUnmount, onUnmounted, nextTick, watch, reactive, computed, provide } from 'vue';
 import { useRoute, useRouter, onBeforeRouteLeave, onBeforeRouteUpdate } from 'vue-router';
 import InputField from '../../components/Input-field.vue';
 import HostApprovalCard from './components/HostApprovalCard.vue';
@@ -251,7 +255,7 @@ import { getMessageList, getSession, forkSession, rewindSession } from "@/api/ch
 import { resolveForkAffordance } from './forkPoint';
 import { rewindSkipMessage } from './rewindNotice';
 import { rewindPrefillText, rewindBlockedByOutgoingWork, canReplaceRewindTranscript, shouldApplyRewindLocally, rewindHistoryHasMore, keepMessagesThroughRewindPoint, rewindableMessageIds, rewindHttpConflictCode, rewindConflictI18nKey } from './rewindView';
-import { getSuggestedQuestions } from "@/api/agent/index";
+import { getSuggestedQuestions, BUILTIN_MAIN_ASSISTANT_ID } from "@/api/agent/index";
 import { questionOriginFromSuggestion } from '@/utils/questionOrigin';
 import { deleteTemporaryAttachment, uploadTemporaryAttachment } from '@/api/chat/temporary-attachments';
 import { useStream } from '../../api/chat/streame'
@@ -293,7 +297,8 @@ import { useAssistantStore } from '@/stores/assistant';
 import { useAssistantPageContext } from '@/composables/useAssistantPageContext';
 import { respondToPageAction } from '@/utils/pageActionResponder';
 import { provideChatSandboxPanel } from '@/composables/useChatSandboxPanel';
-import SandboxSidePanel from '@/components/chat/SandboxSidePanel.vue';
+import SandboxSidePanel from '@/components/chat/SandboxSidePanel.vue'
+// OEM: 对话区顶部工具条（Workspace / 模型 / 召回参数）
 import BrowserTaskPreview from './components/BrowserTaskPreview.vue';
 import PendingPromptDock from './components/PendingPromptDock.vue';
 import BackgroundWorkChip from './components/BackgroundWorkChip.vue';
@@ -302,6 +307,8 @@ import { cancelBackgroundWork, listBackgroundWork } from '@/api/chat/background-
 import { createBackgroundWorkPoller, mergeBackgroundWork } from '@/utils/backgroundWork';
 import { providePromptDock } from '@/composables/usePromptDock';
 import { collectSessionArtifacts, markSessionArtifactDeleted } from '@/utils/sessionArtifacts';
+import { createProjectFileRef } from '@/api/projectFiles';
+import { useProjectStore } from '@/stores/project';
 import { isCollectingSkillArtifacts } from '@/utils/skillArtifacts';
 const inheritedChildTabs = inject(childAgentTabsKey, null);
 const childTabs = inheritedChildTabs || createChildAgentTabs();
@@ -332,12 +339,10 @@ const usemenuStore = useMenuStore();
 const useSettingsStoreInstance = useSettingsStore();
 
 // Whether the active chat session is using the Agent pipeline (not quick-answer).
-const isAgentStreamSession = () => {
-    if (props.embeddedMode) {
-        return !!(props.agentId && props.agentId !== 'builtin-quick-answer');
-    }
-    return useSettingsStoreInstance.isAgentStreamMode;
-};
+// 桌面版固定走 Agent 管线（见下方 agentEnabled），所以中途补充消息恒可用；
+// 不再依赖 isAgentStreamMode —— 那个开关读的是智能体下拉的选择，而输入框
+// 里已经没有下拉了。
+const isAgentStreamSession = () => true;
 
 const uiStore = useUIStore();
 const { navigateToKnowledgeBaseList } = useKnowledgeBaseCreationNavigation();
@@ -376,6 +381,66 @@ const router = useRouter();
 const session_id = ref(props.session_id || route.params.chatid);
 watch(session_id, () => childTabs.reset(), { flush: 'sync' });
 const currentSession = ref(null);
+
+/**
+ * 当前会话所属项目的目录。
+ *
+ * 会话对象只带 project_id，host_dir 在项目列表里，所以要经 store 关联。
+ * 取不到（项目还没加载完、或会话不属于任何项目）时返回空串，
+ * 面板据此显示「未关联项目」而不是发一个注定 403 的请求。
+ */
+const projectStore = useProjectStore();
+// 注意：本文件的 <script setup> 不是 TypeScript，不能写 computed<string>()
+// 这类泛型注解——string 在运行时会当成未定义变量，整页白屏。
+const projectDir = computed(() => {
+  const projectId = currentSession.value?.project_id;
+  if (!projectId) return '';
+  return projectStore.projects.find((item) => item.id === projectId)?.host_dir || '';
+});
+
+/**
+ * 项目文件被 @ 引用：先让后端把磁盘文件登记成会话附件，再挂进输入框。
+ *
+ * 这里不重新上传字节——文件和后端在同一台机器上，后端直接读盘即可。
+ * 拿到 attachment_id 后，它就和用户手动上传的附件走同一条链路：
+ * chip 可单独删除、发送时进 attachment_ids、由解析管线读出内容。
+ */
+const handleProjectFileMention = async ({ entry }) => {
+  // 面板在发事件前已把这个路径标记为「已引用」，失败时要放开占位让用户重试。
+  const releaseRef = () => sandboxPanelRef.value?.releaseProjectFileRef?.(entry.path);
+  if (!session_id.value || !projectDir.value) {
+    MessagePlugin.warning('请先进入一个已关联项目的会话');
+    releaseRef();
+    return;
+  }
+  try {
+    const ref = await createProjectFileRef(session_id.value, {
+      dir: projectDir.value,
+      path: entry.path,
+      kind: entry.kind,
+      agentId: useSettingsStoreInstance.selectedAgentId,
+    });
+    inputFieldRef.value?.attachPreparedFile?.({
+      documentId: ref.attachment_id,
+      name: ref.file_name,
+      size: ref.file_size,
+    });
+  } catch (err) {
+    console.error('[chat] project file reference failed:', err);
+    const msg = err?.response?.data?.error?.message || err?.message || '引用失败';
+    MessagePlugin.error(msg);
+    releaseRef();
+  }
+};
+
+watch(
+  () => currentSession.value?.project_id,
+  (id) => {
+    // 项目列表可能还没拉过（比如从 URL 直接进会话），补一次静默加载。
+    if (id) void projectStore.fetchProjects();
+  },
+  { immediate: true },
+);
 // A session ID can be revisited while requests from its previous visit are still pending.
 let chatLoadVersion = 0;
 const isAutomationSession = computed(() => currentSession.value?.kind === 'automation');
@@ -469,6 +534,8 @@ const loadSessionAndHydrate = async (sid) => {
     }
 };
 const inputFieldRef = ref();
+// 沙箱侧栏（会话产物 / 项目文件）：@ 引用失败时要回调它放开「已引用」占位。
+const sandboxPanelRef = ref();
 const created_at = ref('');
 const limit = ref(20);
 const messagesList = reactive([]);
@@ -597,6 +664,9 @@ async function handleFork(messageId) {
             id: data.session_id,
             path: `chat/${data.session_id}`,
             title: `${sourceTitle}（分支）`,
+            // 分支必须带上项目归属，否则乐观插入的这行会先掉进历史区的
+            // 「未归属项目」列表，直到列表接口刷新才跳回项目节点。
+            project_id: currentSession.value?.project_id || '',
             parent_session_id: sourceSessionId,
             isMore: false,
             isNoTitle: false,
@@ -797,6 +867,12 @@ const userHasScrolledUp = ref(false)
 const SCROLL_BOTTOM_THRESHOLD = 80
 
 
+// 锚点跳转：滚动定位到目标问答，并短暂高亮，让用户确认"跳到了哪一条"。
+// 高亮默认 1.6s 后自动淡出——跳转本身是瞬时动作，长时间留着会干扰阅读。
+const JUMP_FLASH_MS = 1600
+const jumpedMessageId = ref(null)
+let jumpFlashTimer = null
+
 const jumpToQuestion = (id) => {
     const root = scrollContainer.value
     if (!root || !id) return
@@ -809,7 +885,18 @@ const jumpToQuestion = (id) => {
 
     el.scrollIntoView({ block: 'start', behavior: 'smooth' })
 
+    if (jumpFlashTimer !== null) window.clearTimeout(jumpFlashTimer)
+    jumpedMessageId.value = id
+    jumpFlashTimer = window.setTimeout(() => {
+        jumpedMessageId.value = null
+        jumpFlashTimer = null
+    }, JUMP_FLASH_MS)
 }
+
+onBeforeUnmount(() => {
+    if (jumpFlashTimer !== null) window.clearTimeout(jumpFlashTimer)
+    jumpFlashTimer = null
+})
 
 const handleKBEditorSuccess = (kbId) => {
     navigateToKnowledgeBaseList(kbId)
@@ -1586,10 +1673,10 @@ const sendMsg = async (value, modelId = '', mentionedItems = [], imageFiles = []
     activitySessionId.value = String(session_id.value);
     isReplying.value = true;
     loading.value = true;
-    const selectedAgentId = props.embeddedMode ? props.agentId : (useSettingsStoreInstance.selectedAgentId || '');
-    const selectedAgentSourceTenantId = props.embeddedMode
-        ? undefined
-        : (useSettingsStoreInstance.selectedAgentSourceTenantId || undefined);
+    // 桌面版只有这一个助手，固定传常量 ID，不读 localStorage 里的历史选择——
+    // 那些值可能还指向已废弃的 builtin-quick-answer（RAG 管线，无写文件能力）。
+    const selectedAgentId = props.embeddedMode ? props.agentId : BUILTIN_MAIN_ASSISTANT_ID;
+    const selectedAgentSourceTenantId = undefined;
 
     // Images are unified with the attachment pipeline: on the authenticated web
     // client they upload as temporary documents (understood in the background by
@@ -1701,10 +1788,13 @@ const sendMsg = async (value, modelId = '', mentionedItems = [], imageFiles = []
     userHasScrolledUp.value = false;
     scrollToBottom(true);
 
-    // Get agent mode status from settings store (prefer selectedAgentId for builtins)
-    const agentEnabled = props.embeddedMode
-        ? (props.agentId && props.agentId !== 'builtin-quick-answer')
-        : useSettingsStoreInstance.isAgentStreamMode;
+    // 桌面版固定走 Agent 管线。输入框里已经没有模式/智能体选择，用户直接
+    // 说话即可；模型自己判断要不要检索、要不要把成稿写进工作区。
+    //
+    // 这里不再读 isAgentStreamMode：那个开关依赖 builtin-quick-answer /
+    // builtin-smart-reasoning 的切换，而快速问答走只读 RAG 管线，没有任何
+    // 文件写入工具，正是「生成了 md 却没有文件」的原因。
+    const agentEnabled = true;
 
     // Get web search status from settings store. The embedded assistant has no
     // toggle of its own; its agent config decides on the server.
@@ -2206,7 +2296,7 @@ onBeforeRouteUpdate((to, from, next) => {
 
 .host-approval-pop {
     width: 100%;
-    max-width: 800px;
+    max-width: 680px;
     margin: 0 auto 8px;
     padding: 0 16px;
     box-sizing: border-box;
@@ -2233,6 +2323,26 @@ onBeforeRouteUpdate((to, from, next) => {
 
     :deep(.browser-task-preview) {
         pointer-events: auto;
+    }
+}
+
+/* 锚点跳转落点高亮：只做很轻的底色 + 左侧竖条，
+   目的是让眼睛快速定位，而不是把整条消息刷成高饱和色。 */
+.message-row.is-jump-target {
+    position: relative;
+    border-radius: var(--app-radius-lg);
+    background: var(--td-bg-color-container-hover);
+    transition: background-color var(--app-motion-fast) ease-out;
+
+    &::before {
+        content: '';
+        position: absolute;
+        top: 6px;
+        bottom: 6px;
+        left: -2px;
+        width: 3px;
+        border-radius: 2px;
+        background: var(--td-brand-color);
     }
 }
 
@@ -2293,7 +2403,8 @@ onBeforeRouteUpdate((to, from, next) => {
     display: flex;
     flex-direction: column;
     gap: 20px;
-    max-width: 960px;
+    /* 与 .msg_list 同宽，避免骨架态到真实内容之间的横向跳变 */
+    max-width: 632px;
     padding: 16px 0;
     animation: contentFadeIn 0.3s ease-out;
 }
@@ -2315,13 +2426,13 @@ onBeforeRouteUpdate((to, from, next) => {
     flex-shrink: 0;
     margin: 0 auto;
     width: 100%;
-    max-width: 960px;
+    max-width: 680px;
     box-sizing: border-box;
     position: relative;
 
     &:not(.is-embedded) {
         padding: 0 var(--chat-content-inset, 20px);
-        max-width: calc(960px + 2 * var(--chat-content-inset, 20px));
+        max-width: calc(680px + 2 * var(--chat-content-inset, 20px));
     }
 
     &.is-embedded {
@@ -2352,7 +2463,9 @@ onBeforeRouteUpdate((to, from, next) => {
     display: flex;
     flex-direction: column;
     gap: 16px;
-    max-width: 960px;
+    /* 对话内容列比输入框（680px）窄 48px，正文左右各留 24px 内边距，
+       不再和输入框边缘严丝合缝地顶在一起。 */
+    max-width: 632px;
     flex: 1;
     margin: 0 auto;
     width: 100%;
@@ -2360,7 +2473,7 @@ onBeforeRouteUpdate((to, from, next) => {
 
     &:not(.is-embedded) {
         padding: 0 var(--chat-content-inset, 20px);
-        max-width: calc(960px + 2 * var(--chat-content-inset, 20px));
+        max-width: calc(632px + 2 * var(--chat-content-inset, 20px));
     }
 
     // Matches the composer's inset, and keeps text clear of the scrollbar,

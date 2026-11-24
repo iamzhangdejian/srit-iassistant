@@ -1,7 +1,9 @@
 export const QUESTION_TICK_INSET_PX = 8
 export const QUESTION_TICK_GAP_PX = 8
 export const QUESTION_TICK_MOUNTAIN_GAIN = 0.8
-export const CURRENT_TICK_SCALE = 1.55
+// 当前轮次的刻度放大倍数。1.55 会让 12px 的刻度拉到 18.6px，
+// 配合 0.4 的默认透明度显得过重；1.3 只做轻微强调，靠加粗和变深区分。
+export const CURRENT_TICK_SCALE = 1.3
 export const ACTIVE_QUESTION_TOP_OFFSET_PX = 72
 export const VIEWPORT_BAND_MIN_HEIGHT_PX = 16
 export const QUESTION_MINIMAP_TRACK_MAX_PX = 360
@@ -56,8 +58,10 @@ export function isChatOverflowing(scrollHeight: number, clientHeight: number): b
   return scrollHeight > clientHeight
 }
 
-export function shouldShowQuestionMinimap(overflowing: boolean, questionCount: number, availableGutter: number): boolean {
-  return overflowing && questionCount >= 1 && availableGutter >= QUESTION_MINIMAP_MIN_GUTTER_PX
+// 只要对话内容超出视口、且至少有一轮问答，就显示锚点导航。
+// 不再把「旁边留白够不够」作为条件：导航是浮层，窄窗口也应当可用。
+export function shouldShowQuestionMinimap(overflowing: boolean, questionCount: number): boolean {
+  return overflowing && questionCount >= 1
 }
 
 export function collectOutlineMessages(messages: ChatMessageLike[]): OutlineMessage[] {

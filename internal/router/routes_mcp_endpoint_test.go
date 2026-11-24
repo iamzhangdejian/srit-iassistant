@@ -98,6 +98,11 @@ func (*protocolWikiService) GetPageBySlug(ctx context.Context, id, slug string) 
 
 func TestPublishedMCPRouteProtocolAndAuthorization(t *testing.T) {
 	gin.SetMode(gin.TestMode)
+	// OEM: MCP 能力由 FeatCutMCP 主动裁剪，/mcp 相关路由不再注册，
+	// 本测试校验的就是这些路由，裁剪期间预期失败，故跳过。
+	if FeatCutMCP {
+		t.Skip("MCP routes are cut by FeatCutMCP")
+	}
 	t.Setenv("LOCAL_STORAGE_BASE_DIR", t.TempDir())
 	srv := mcpserver.NewServer(&protocolKBService{}, nil, nil, &protocolWikiService{}, nil, nil, nil, nil,
 		nil, nil, nil, nil, nil, nil, nil, nil)
@@ -307,6 +312,11 @@ type stubMCPEndpointServiceForRoutes struct {
 // injected, mirroring RegisterMCPServerRoutes' nil guard.
 func TestMCPServerRoutesAreMountedAndReported(t *testing.T) {
 	gin.SetMode(gin.TestMode)
+	// OEM: MCP 能力由 FeatCutMCP 主动裁剪，这里校验的 /mcp 路由不再注册，
+	// 裁剪期间预期失败，故跳过。
+	if FeatCutMCP {
+		t.Skip("MCP routes are cut by FeatCutMCP")
+	}
 	engine := gin.New()
 	srv := mcpserver.NewServer(nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil, nil)
 	RegisterMCPServerRoutes(engine, srv, &stubMCPEndpointServiceForRoutes{}, nil)

@@ -99,6 +99,9 @@
     justify-content: center;
     gap: 10px;
     width: 100%;
+    // flex 子项默认 min-width:auto，内容多时会把父容器顶宽。
+    // 显式归零后由父级的 width:100% 决定实际宽度，窄屏才收得住。
+    min-width: 0;
 }
 
 .suggested-question-card {

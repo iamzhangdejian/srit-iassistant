@@ -1,5 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, watch } from 'vue'
+// OEM: 白标配置
+import { BRAND } from '@/config/oem'
 import { useRouter } from 'vue-router'
 import { useI18n } from 'vue-i18n'
 import { MessagePlugin, NotifyPlugin } from 'tdesign-vue-next'
@@ -8,10 +10,8 @@ import ManualKnowledgeEditor from '@/components/manual-knowledge-editor.vue'
 import UploadConfirmHost from '@/components/UploadConfirmHost.vue'
 import { useAuthStore } from '@/stores/auth'
 import { useSettingsStore } from '@/stores/settings'
-import { getCurrentUser, userInfoFromApi } from '@/api/auth'
 import { consumePendingTenantSwitchToast } from '@/utils/tenantSwitch'
 import { useRoleLabel } from '@/composables/useRoleLabel'
-import { notifyLoginSuccess } from '@/utils/loginNotify'
 import { renderWorkspaceNotifyContent } from '@/utils/workspaceNotifyContent'
 
 // TDesign locale configs
@@ -23,7 +23,7 @@ import ruRUConfig from 'tdesign-vue-next/esm/locale/ru_RU'
 import zhTWConfig from 'tdesign-vue-next/esm/locale/zh_TW'
 
 const { locale, t, tm } = useI18n()
-const { formatRole, roleIcon } = useRoleLabel()
+const { roleIcon } = useRoleLabel()
 const router = useRouter()
 const authStore = useAuthStore()
 const settingsStore = useSettingsStore()
@@ -38,140 +38,6 @@ const tdLocaleMap: Record<string, object> = {
 }
 
 const tdGlobalConfig = computed(() => tdLocaleMap[locale.value] || enUSConfig)
-
-const decodeOIDCResult = (encoded: string) => {
-  const normalized = encoded.replace(/-/g, '+').replace(/_/g, '/')
-  const padded = normalized + '='.repeat((4 - normalized.length % 4) % 4)
-  const binary = window.atob(padded)
-  const bytes = Uint8Array.from(binary, char => char.charCodeAt(0))
-  return JSON.parse(new TextDecoder().decode(bytes))
-}
-
-const clearOIDCCallbackState = (path = '/') => {
-  window.history.replaceState(window.history.state, document.title, router.resolve(path).href)
-}
-
-const syncOIDCUserContext = async () => {
-  const currentUserResponse = await getCurrentUser()
-  if (!currentUserResponse.success || !currentUserResponse.data?.user) {
-    throw new Error(currentUserResponse.message || 'Failed to get user information')
-  }
-
-  const { user, tenant, memberships, capabilities } = currentUserResponse.data
-  authStore.setUser(userInfoFromApi(user, tenant?.id))
-  if (tenant) {
-    authStore.setTenant({
-      id: String(tenant.id) || '',
-      name: tenant.name || '',
-      owner_id: tenant.owner_id || user.id || '',
-      description: tenant.description,
-      status: tenant.status,
-      business: tenant.business,
-      storage_quota: tenant.storage_quota,
-      storage_used: tenant.storage_used,
-      created_at: tenant.created_at || new Date().toISOString(),
-      updated_at: tenant.updated_at || new Date().toISOString()
-    })
-  } else {
-    authStore.setTenant(null)
-  }
-  // Refresh memberships so currentTenantRole reflects any role change
-  // since the last login (e.g. an Owner demoted us to Viewer in a
-  // peer tenant). Without this, memberships stay frozen at the
-  // login-time snapshot and the UI silently lies about our authority.
-  if (Array.isArray(memberships)) {
-    authStore.setMemberships(memberships)
-  }
-  if (typeof capabilities?.can_create_tenant === 'boolean') {
-    authStore.setCanCreateTenant(capabilities.can_create_tenant)
-  }
-  // Same active-vs-home reconciliation as Login.vue: if the OIDC login
-  // landed us in a non-home tenant (because the backend honoured a
-  // remembered last-active-tenant preference) make sure X-Tenant-ID
-  // override is set; otherwise drop any stale override.
-  const activeIdNum = tenant?.id != null ? Number(tenant.id) : NaN
-  const homeIdNum = user.tenant_id != null ? Number(user.tenant_id) : NaN
-  if (Number.isFinite(activeIdNum) && Number.isFinite(homeIdNum) && activeIdNum !== homeIdNum) {
-    authStore.setSelectedTenant(activeIdNum, tenant?.name || null)
-  } else {
-    authStore.setSelectedTenant(null, null)
-  }
-}
-
-const persistOIDCLoginResponse = async (response: any) => {
-  if (!response.token) {
-    throw new Error(response.message || 'OIDC login failed')
-  }
-
-  authStore.setToken(response.token)
-  if (response.refresh_token) {
-    authStore.setRefreshToken(response.refresh_token)
-  }
-
-  await syncOIDCUserContext()
-
-  // OIDC 跳转前暂存的邀请 token：拿到会话后兑换并进入对应空间。
-  const pendingInviteToken = sessionStorage.getItem('weknora_pending_invite_token')
-  if (pendingInviteToken) {
-    sessionStorage.removeItem('weknora_pending_invite_token')
-    const result = await authStore.acceptInvitationByTokenAndRefresh(pendingInviteToken)
-    await nextTick()
-    if (result.ok) MessagePlugin.success(t('inviteRegister.joined'))
-    else MessagePlugin.warning(t('inviteRegister.invalidBody'))
-    // 会话已有效，无论 token 是否兑换成功都进入应用。
-    router.replace('/platform/knowledge-bases')
-    return
-  }
-
-  await nextTick()
-  router.replace(authStore.hasValidTenant ? '/platform/knowledge-bases' : '/onboarding/workspace')
-}
-
-const handleGlobalOIDCCallback = async () => {
-  const hash = window.location.hash.startsWith('#') ? window.location.hash.slice(1) : ''
-  if (!hash) return
-
-  const params = new URLSearchParams(hash)
-  const oidcError = params.get('oidc_error')
-  const oidcErrorDescription = params.get('oidc_error_description')
-  const oidcResult = params.get('oidc_result')
-
-  if (!oidcError && !oidcResult) return
-
-  if (oidcError) {
-    clearOIDCCallbackState('/login')
-    await router.replace('/login')
-    MessagePlugin.error(oidcErrorDescription || 'OIDC login failed')
-    return
-  }
-
-  try {
-    if (!oidcResult) {
-      clearOIDCCallbackState('/login')
-      await router.replace('/login')
-      MessagePlugin.error('OIDC login failed')
-      return
-    }
-
-    const response = decodeOIDCResult(oidcResult)
-    if (response.success) {
-      clearOIDCCallbackState('/')
-      await persistOIDCLoginResponse(response)
-      notifyLoginSuccess(response, t, tm, formatRole, roleIcon)
-      return
-    }
-
-    clearOIDCCallbackState('/login')
-    await router.replace('/login')
-    MessagePlugin.error(response.message || 'OIDC login failed')
-  } catch (error: any) {
-    console.error('Global OIDC callback handling failed:', error)
-    authStore.logout()
-    clearOIDCCallbackState('/login')
-    await router.replace('/login')
-    MessagePlugin.error(error.message || 'OIDC login failed')
-  }
-}
 
 let updateCheckTimer: ReturnType<typeof setInterval> | null = null
 
@@ -241,7 +107,9 @@ const showPendingTenantSwitchToast = () => {
 }
 
 onMounted(() => {
-  handleGlobalOIDCCallback()
+  // OEM: 运行时注入产品名到浏览器标题，保证与 src/config/oem.ts 单一来源一致
+  document.title = BRAND.name
+
   showPendingTenantSwitchToast()
 
   // Auto check for updates on startup

@@ -50,7 +50,7 @@
     <div v-if="previewItem" class="artifact-preview-body">
       <DocumentPreview
         :toolbar-target="previewActions"
-        :session-id="sessionId"
+        :session-id="previewItem.sessionId"
         :message-id="previewItem.messageId"
         :artifact-index="previewItem.index"
         :file-type="previewFileType"
@@ -81,7 +81,7 @@
             <span>{{ currentItems.length }}</span>
           </button>
           <button type="button" :aria-pressed="scope === 'all'" @click="scope = 'all'">
-            {{ $t('chat.sandbox.artifactsAll') }}
+            {{ $t('chat.sandbox.artifactsAllSessions') }}
             <span>{{ items.length }}</span>
           </button>
         </div>
@@ -120,6 +120,10 @@
                 <span>{{ formatArtifactSize(item.file_size) }}</span>
                 <span class="artifact-meta-sep">·</span>
                 <span>{{ formatArtifactDateTime(item.created_at) }}</span>
+              </span>
+              <!-- 跨会话列表里同名文件很常见，标出来源会话才知道该回哪一轮找 -->
+              <span v-if="item.sessionTitle" class="artifact-origin" :title="item.sessionTitle">
+                {{ item.sessionTitle }}
               </span>
             </span>
           </button>
@@ -162,6 +166,8 @@ import { computed, nextTick, reactive, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { MessagePlugin } from 'tdesign-vue-next'
 import { deleteMessageArtifact, downloadArtifact } from '@/api/chat'
+import { listArtifactLibrary, type ArtifactLibraryItem } from '@/api/artifacts'
+import { mergeArtifactPanelRows } from '@/utils/artifactPanelMerge'
 import { resolveFilePreviewExt } from '@/utils/filePreview'
 import {
   formatArtifactDateTime,
@@ -172,6 +178,17 @@ import { useChatSandboxPanel, type ArtifactPanelFocusState } from '@/composables
 import { useConfirmDelete } from '@/components/settings/useConfirmDelete'
 import DocumentPreview from '@/components/document-preview.vue'
 import ArtifactFileIcon from './ArtifactFileIcon.vue'
+
+/**
+ * One row of the panel. The list is served from the cross-session artifact
+ * library, so every row carries its own session: previewing or downloading it
+ * must use that session, not the one the panel happens to be docked in.
+ */
+interface PanelArtifactRow extends SessionArtifactItem {
+  sessionId: string
+  sessionTitle?: string
+  versionCount?: number
+}
 
 const props = withDefaults(
   defineProps<{
@@ -195,18 +212,82 @@ const panel = useChatSandboxPanel()
 const confirmDelete = useConfirmDelete()
 const previewActions = ref<HTMLElement | null>(null)
 const listRef = ref<HTMLElement | null>(null)
-const previewItem = ref<SessionArtifactItem | null>(null)
+const previewItem = ref<PanelArtifactRow | null>(null)
 const downloading = reactive<Record<string, boolean>>({})
 const deleting = reactive<Record<string, boolean>>({})
 const focusedMessageId = ref<string | null>(null)
 const scope = ref<'current' | 'all'>('all')
 const searchQuery = ref('')
-const currentItems = computed(() => props.items.filter((item) => item.messageId === focusedMessageId.value))
+
+// The panel lists the project-wide artifact library, not just this chat:
+// every session in this space contributes, which is what makes a file the
+// assistant produced in another conversation findable here. The scope toggle
+// still narrows to the focused turn when the panel was opened from one.
+const libraryItems = ref<PanelArtifactRow[]>([])
+const libraryLoading = ref(false)
+const libraryError = ref(false)
+// Latest fetch wins: the user can flip scopes or the active tab while a
+// request is in flight, and a stale response must not overwrite a newer one.
+let libraryTicket = 0
+
+async function loadLibrary() {
+  const mine = ++libraryTicket
+  libraryLoading.value = true
+  libraryError.value = false
+  try {
+    const res = await listArtifactLibrary({ page: 1, pageSize: 200 })
+    if (mine !== libraryTicket) return
+    const rows = Array.isArray(res?.data) ? res.data : []
+    libraryItems.value = rows.map(toPanelRow)
+  } catch (err) {
+    if (mine !== libraryTicket) return
+    console.error('[ChatArtifactsPanel] load library failed:', err)
+    libraryItems.value = []
+    libraryError.value = true
+  } finally {
+    if (mine === libraryTicket) libraryLoading.value = false
+  }
+}
+
+function toPanelRow(row: ArtifactLibraryItem): PanelArtifactRow {
+  return {
+    index: row.index,
+    handle: row.handle,
+    file_name: row.file_name,
+    file_type: row.file_type,
+    file_size: row.file_size,
+    source_path: row.source_path,
+    // The library omits mod_time; created_at is the only timestamp the panel
+    // renders, so reuse it rather than inventing a value.
+    mod_time: row.created_at,
+    created_at: row.created_at,
+    messageId: row.message_id,
+    sessionId: row.session_id,
+    sessionTitle: row.session_title,
+    versionCount: row.version_count,
+  }
+}
+
+// Files written in this very turn may not be in the library response yet: the
+// panel can open while the collect is still running. The prop list is the
+// live view, so merge it over the fetched rows and let it win on collision.
+const mergedItems = computed<PanelArtifactRow[]>(() =>
+  mergeArtifactPanelRows(libraryItems.value, props.items, props.sessionId),
+)
+
+function rowKey(row: Pick<PanelArtifactRow, 'sessionId' | 'messageId' | 'index'>): string {
+  return `${row.sessionId}:${row.messageId}:${row.index}`
+}
+
+const currentItems = computed(() =>
+  mergedItems.value.filter((item) => item.messageId === focusedMessageId.value),
+)
 const visibleItems = computed(() => {
-  const items = scope.value === 'current' ? currentItems.value : props.items
+  const items = scope.value === 'current' ? currentItems.value : mergedItems.value
   const query = searchQuery.value.trim().toLocaleLowerCase()
   return query ? items.filter((item) => item.file_name.toLocaleLowerCase().includes(query)) : items
 })
+const collecting = computed(() => props.collecting || libraryLoading.value)
 
 const previewFileType = computed(() => {
   const item = previewItem.value
@@ -214,22 +295,22 @@ const previewFileType = computed(() => {
   return resolveFilePreviewExt(item.file_name, item.file_type)
 })
 
-function downloadKey(item: SessionArtifactItem): string {
-  return `${item.messageId}:${item.index}`
+function downloadKey(item: PanelArtifactRow): string {
+  return rowKey(item)
 }
 
-function isDownloading(item: SessionArtifactItem): boolean {
+function isDownloading(item: PanelArtifactRow): boolean {
   return !!downloading[downloadKey(item)]
 }
 
-function isDeleting(item: SessionArtifactItem): boolean {
+function isDeleting(item: PanelArtifactRow): boolean {
   return !!deleting[downloadKey(item)]
 }
 
 // Each row here is one regeneration of a file, so the delete takes just that
-// version. The artifact library, which folds versions into one entry, is where
-// deleting the whole file lives.
-function handleDelete(item: SessionArtifactItem) {
+// version. The row carries its own session, which in the project-wide list may
+// be a different conversation than the panel is docked in.
+function handleDelete(item: PanelArtifactRow) {
   if (isDeleting(item)) return
   confirmDelete({
     title: t('agent.artifactDrawer.deleteTitle'),
@@ -238,16 +319,19 @@ function handleDelete(item: SessionArtifactItem) {
   })
 }
 
-async function performDelete(item: SessionArtifactItem) {
-  if (!props.sessionId || !item.messageId) {
+async function performDelete(item: PanelArtifactRow) {
+  // item.sessionId, not props.sessionId: in the project-wide list the row can
+  // belong to another conversation, and the delete endpoint is per-session.
+  if (!item.sessionId || !item.messageId) {
     MessagePlugin.error(t('agent.artifactDrawer.deleteFailed'))
     return
   }
   const key = downloadKey(item)
   deleting[key] = true
   try {
-    await deleteMessageArtifact(props.sessionId, item.messageId, item.index)
+    await deleteMessageArtifact(item.sessionId, item.messageId, item.index)
     if (previewItem.value && downloadKey(previewItem.value) === key) previewItem.value = null
+    libraryItems.value = libraryItems.value.filter((row) => rowKey(row) !== key)
     emit('deleted', { messageId: item.messageId, index: item.index })
     MessagePlugin.success(t('agent.artifactDrawer.deleted'))
   } catch (err) {
@@ -258,11 +342,11 @@ async function performDelete(item: SessionArtifactItem) {
   }
 }
 
-function findItem(messageId: string, previewIndex?: number | null): SessionArtifactItem | undefined {
+function findItem(messageId: string, previewIndex?: number | null): PanelArtifactRow | undefined {
   if (previewIndex != null && Number.isInteger(previewIndex)) {
-    return props.items.find((item) => item.messageId === messageId && item.index === previewIndex)
+    return mergedItems.value.find((item) => item.messageId === messageId && item.index === previewIndex)
   }
-  return props.items.find((item) => item.messageId === messageId)
+  return mergedItems.value.find((item) => item.messageId === messageId)
 }
 
 function applyFocus(focus: ArtifactPanelFocusState | null | undefined) {
@@ -310,6 +394,17 @@ watch(
   { immediate: true },
 )
 
+// Load on first mount, then again whenever the panel becomes visible. The
+// panel is kept mounted and v-show'n, so a mount-only load would show a stale
+// list after files were produced in other conversations.
+watch(
+  () => panel?.visible.value && panel?.activeTab.value === 'artifacts',
+  (showing) => {
+    if (showing) void loadLibrary()
+  },
+  { immediate: true },
+)
+
 watch(
   () => props.sessionId,
   () => {
@@ -318,17 +413,16 @@ watch(
     scope.value = 'all'
     searchQuery.value = ''
     panel?.clearArtifactFocus()
+    void loadLibrary()
   },
 )
 
 watch(
   () => props.items,
-  (items) => {
+  () => {
     const current = previewItem.value
     if (current) {
-      const next = items.find(
-        (item) => item.messageId === current.messageId && item.index === current.index,
-      )
+      const next = mergedItems.value.find((item) => rowKey(item) === rowKey(current))
       if (!next) previewItem.value = null
       return
     }
@@ -338,7 +432,7 @@ watch(
   },
 )
 
-function openPreview(item: SessionArtifactItem) {
+function openPreview(item: PanelArtifactRow) {
   previewItem.value = item
 }
 
@@ -346,15 +440,15 @@ function closePreview() {
   previewItem.value = null
 }
 
-async function handleDownload(item: SessionArtifactItem) {
-  if (!props.sessionId || !item.messageId) {
+async function handleDownload(item: PanelArtifactRow) {
+  if (!item.sessionId || !item.messageId) {
     MessagePlugin.error(t('agent.artifactDrawer.downloadFailed'))
     return
   }
   const key = downloadKey(item)
   downloading[key] = true
   try {
-    const blob = await downloadArtifact(props.sessionId, item.messageId, item.index)
+    const blob = await downloadArtifact(item.sessionId, item.messageId, item.index)
     const url = URL.createObjectURL(blob)
     const a = document.createElement('a')
     a.href = url
@@ -565,6 +659,20 @@ async function handleDownload(item: SessionArtifactItem) {
 
 .artifact-meta-sep {
   opacity: 0.6;
+}
+
+/* 来源会话：跨会话列表里同名文件很常见，标一行才知道该回哪一轮找。
+   单独一行并省略号截断，不挤占上面的大小/时间。 */
+.artifact-origin {
+  margin-top: 1px;
+  font-size: var(--app-text-xs);
+  line-height: 1.3;
+  color: var(--td-text-color-placeholder);
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  opacity: 0.85;
 }
 
 .artifact-download.t-button {

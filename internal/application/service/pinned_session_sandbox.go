@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 
@@ -189,6 +190,26 @@ func (a *PinnedSessionSandbox) ListSessionFiles(
 // TryLockRewind locks rewind through the session's pinned manager. A manager
 // that can take the session exclusively returns the context to reset with;
 // one with only the rewind lock keeps ctx; others succeed as a no-op.
+// StatSessionFile forwards to the pinned manager so collectors can resolve a
+// recorded path without walking the whole workspace. Dropped here, the
+// artifact collector falls back to a capped recursive listing and misses
+// files past the cap (large projects).
+func (a *PinnedSessionSandbox) StatSessionFile(
+	ctx context.Context, sessionID, filePath string,
+) (*sandbox.RemoteStatEntry, error) {
+	mgr := a.manager(ctx, sessionID)
+	if mgr == nil {
+		return nil, fmt.Errorf("pinned session sandbox: no manager for session %s", sessionID)
+	}
+	store, ok := mgr.(interface {
+		StatSessionFile(context.Context, string, string) (*sandbox.RemoteStatEntry, error)
+	})
+	if !ok {
+		return nil, fmt.Errorf("pinned session sandbox: manager for session %s cannot stat files", sessionID)
+	}
+	return store.StatSessionFile(ctx, sessionID, filePath)
+}
+
 func (a *PinnedSessionSandbox) TryLockRewind(ctx context.Context, sessionID string) (context.Context, func(), error) {
 	mgr := a.manager(ctx, sessionID)
 	type exclusiveLocker interface {

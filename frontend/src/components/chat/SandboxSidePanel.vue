@@ -57,6 +57,19 @@
           @deleted="emit('artifactDeleted', $event)"
         />
 
+        <!-- 项目文件：列出本项目目录下的真实文件，与「产物」互补
+             （产物只列对话生成并登记过的文件）。 -->
+        <ChatProjectFilesPanel
+          ref="projectFilesRef"
+          v-show="panel?.activeTab.value === 'projectFiles'"
+          class="chat-sandbox-panel__artifacts"
+          :project-dir="projectDir"
+          :active="panel?.activeTab.value === 'projectFiles'"
+          :session-id="sessionId"
+          :agent-id="agentId"
+          @mention="emit('projectFileMention', $event)"
+        />
+
         <!-- 终端：首次激活时惰性挂载；切 tab 用 v-show 保留实例（不丢 PTY）。 -->
         <SandboxTerminal
           v-if="terminalMounted"
@@ -105,14 +118,22 @@ import {
 import SandboxTerminal from '@/views/chat/components/SandboxTerminal.vue'
 import SandboxDesktop from '@/views/chat/components/SandboxDesktop.vue'
 import ChatArtifactsPanel from '@/views/chat/components/ChatArtifactsPanel.vue'
+import ChatProjectFilesPanel from '@/views/chat/components/ChatProjectFilesPanel.vue'
 import PanelResizeHandle from '@/components/PanelResizeHandle.vue'
 import { useChatResourcesStore } from '@/stores/chatResources'
 import { useDeploymentCapabilitiesStore } from '@/stores/deploymentCapabilities'
 import type { SessionArtifactItem } from '@/utils/sessionArtifacts'
+// OEM: 沙箱面板 Tab 白名单（只保留 artifacts + terminal）
+import { OEM_SANDBOX_TABS } from '@/config/oem'
 
 const props = withDefaults(
   defineProps<{
     sessionId: string
+    /**
+     * 当前会话所属项目的目录（host_dir）。空串表示会话没关联项目，
+     * 「项目文件」tab 据此显示未关联提示而不是发请求。
+     */
+    projectDir?: string
     /** 当前会话选中的 agent（首次连接时按其配置自动创建沙箱）。 */
     agentId?: string
     /** 共享智能体来源空间，缺省表示本空间自有 agent。 */
@@ -125,6 +146,11 @@ const props = withDefaults(
     artifactsCollecting?: boolean
   }>(),
   {
+    // 这些 prop 给默认值时，Vue 会为它们生成运行时类型声明（String/Number/
+    // Boolean），所以有默认值的 prop 必须有对应类型的初始化函数。
+    // projectDir 没写默认值，但它是可选的 string，同样需要一个空串兜底，
+    // 否则模板里拼 class 时会踩到 undefined，且 props 类型表里缺一项。
+    projectDir: '',
     artifacts: () => [],
     artifactsCollecting: false,
     shiftWidth: 420,
@@ -133,10 +159,20 @@ const props = withDefaults(
 
 // The artifact list is owned by the chat view (a computed over the loaded
 // history), so a delete inside the panel has to travel back up to it.
-const emit = defineEmits<{ (e: 'artifactDeleted', payload: { messageId: string; index: number }): void }>()
+const emit = defineEmits<{
+  (e: 'artifactDeleted', payload: { messageId: string; index: number }): void
+  // 项目文件被 @ 引用：面板只管发起，真正塞进输入框的是聊天页。
+  (e: 'projectFileMention', payload: { entry: { path: string; rel: string; name: string; kind: 'file' | 'dir'; size: number } }): void
+}>()
 
 const { t } = useI18n()
 const panel = useChatSandboxPanel()
+
+/** 项目文件面板实例：@ 引用失败时由聊天页回调它放开「已引用」占位。 */
+const projectFilesRef = ref<InstanceType<typeof ChatProjectFilesPanel> | null>(null)
+defineExpose({
+  releaseProjectFileRef: (path: string) => projectFilesRef.value?.clearReference?.(path),
+})
 const chatResources = useChatResourcesStore()
 const deploymentCapabilities = useDeploymentCapabilitiesStore()
 const sandboxConfigsReady = ref(false)
@@ -160,15 +196,35 @@ const desktopTabVisible = computed(() => {
   return Boolean(cfg.config?.desktop_enabled)
 })
 
+// OEM 改造：沙箱面板现在只保留「产物」一个 Tab。
+//
+// 「桌面」Tab（VNC 远程桌面）已移除：
+//   • 前端不再渲染 desktop Tab，用户无法从界面进入；
+//   • 后端对应路由 /api/v1/sessions/:id/sandbox/desktop 也已由
+//     internal/router/router.go 的 FeatCutSandboxDesktop 开关关闭。
+//
+// 「交互终端」Tab 也已移除。它连的不是本机 shell，而是会话绑定沙箱
+// （Cube/E2B 微虚拟机）里的 PTY；Lite 版没有沙箱配置、智能体路由又被
+// 裁剪，点「创建并启动」必然落到 SANDBOX_NOT_BOUND，提示语却让用户
+// 「切换到配置了沙箱的智能体」——没有这个智能体。与其露半截误导人，
+// 不如不露。
+//
+// 若某天需要恢复，把对应 id 加回 OEM_SANDBOX_TABS（并打开后端开关）
+// 即可，组件与路由都还在。
 const tabs = computed(() => {
-  const list: Array<{ id: SandboxPanelTab; icon: string; label: string }> = [
+  const all: Array<{ id: SandboxPanelTab; icon: string; label: string }> = [
     { id: 'artifacts', icon: 'folder', label: t('chat.sandbox.tabArtifacts') },
+    { id: 'projectFiles', icon: 'file-word', label: t('chat.sandbox.tabProjectFiles') },
     { id: 'terminal', icon: 'terminal', label: t('chat.sandbox.tabTerminal') },
+    { id: 'desktop', icon: 'desktop', label: t('chat.sandbox.tabDesktop') },
   ]
-  if (desktopTabVisible.value) {
-    list.push({ id: 'desktop', icon: 'desktop', label: t('chat.sandbox.tabDesktop') })
-  }
-  return list
+  const allowed = new Set<string>(OEM_SANDBOX_TABS)
+  return all.filter((item) => {
+    if (!allowed.has(item.id)) return false
+    // desktop 仍受沙箱配置开关约束（配置里没开桌面就不显示）
+    if (item.id === 'desktop' && !desktopTabVisible.value) return false
+    return true
+  })
 })
 
 // 终端 / 桌面惰性挂载（首次切到对应 tab 时），面板关闭即销毁（v-if），

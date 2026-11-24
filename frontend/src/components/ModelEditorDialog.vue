@@ -107,60 +107,18 @@
             </button>
           </div>
 
-          <!-- Ollama不可用时的提示信息 -->
-          <div v-if="shouldShowOllamaUnavailableTip(formData.source, activeModelType, ollamaServiceStatus)"
-            class="ollama-unavailable-tip">
-            <t-icon name="error-circle-filled" class="tip-icon" />
-            <span class="tip-text">{{ $t('model.editor.ollamaUnavailable') }}</span>
-            <t-button variant="text" size="small" @click="goToOllamaSettings" class="tip-link">
-              <template #icon><t-icon name="jump" /></template>
-              {{ $t('model.editor.goToOllamaSettings') }}
-            </t-button>
-          </div>
         </div>
 
-        <!-- Ollama 本地模型选择器 -->
+        <!-- Ollama 本地模型名称：纯文本输入（与远程模型名保持同一种交互） -->
         <div v-if="formData.source === 'local'" class="form-item">
           <label class="form-label required">{{ $t('model.modelName') }}</label>
-          <div class="model-select-row">
-            <t-select v-model="formData.modelName" :loading="loadingOllamaModels" :class="{ 'downloading': downloading }"
-              :style="downloading ? `--progress: ${downloadProgress}%` : ''" filterable :filter="handleModelFilter"
-              :placeholder="$t('model.searchPlaceholder')" @focus="loadOllamaModels"
-              @visible-change="handleDropdownVisibleChange">
-              <!-- 已下载的模型 -->
-              <t-option v-for="model in filteredOllamaModels" :key="model.name" :value="model.name" :label="model.name">
-                <div class="model-option">
-                  <t-icon name="check-circle-filled" class="downloaded-icon" />
-                  <span class="model-name">{{ model.name }}</span>
-                  <span class="model-size">{{ formatModelSize(model.size) }}</span>
-                </div>
-              </t-option>
-
-              <!-- 下载新模型选项（仅当搜索词不在列表中时显示） -->
-              <t-option v-if="showDownloadOption" :value="`__download__${searchKeyword}`"
-                :label="$t('model.editor.downloadLabel', { keyword: searchKeyword })" class="download-option">
-                <div class="model-option download">
-                  <t-icon name="download" class="download-icon" />
-                  <span class="model-name">{{ $t('model.editor.downloadLabel', { keyword: searchKeyword }) }}</span>
-                </div>
-              </t-option>
-
-              <!-- 下载进度后缀 -->
-              <template v-if="downloading" #suffix>
-                <div class="download-suffix">
-                  <t-icon name="loading" class="spinning" />
-                  <span class="progress-text">{{ downloadProgress.toFixed(1) }}%</span>
-                </div>
-              </template>
-            </t-select>
-
-            <!-- 刷新按钮 -->
-            <t-button variant="text" size="small" :loading="loadingOllamaModels" @click="refreshOllamaModels"
-              class="refresh-btn">
-              <t-icon name="refresh" />
-              {{ $t('model.editor.refreshList') }}
-            </t-button>
-          </div>
+          <t-input
+            v-model="formData.modelName"
+            :placeholder="$t('model.editor.modelNamePlaceholder.local')"
+            clearable
+            autocomplete="off"
+            spellcheck="false"
+          />
         </div>
       </section>
 
@@ -257,53 +215,27 @@
           </template>
 
           <!--
-            模型名称：厂商内置目录做候选，同时允许自由输入（filterable + creatable）。
-            选中目录内模型时自动带出上下文窗口 / 输出上限 / 视觉 / 维度（仅填空字段）。
+            模型名称：纯文本输入。
+            OEM 改造——不再提供厂商内置目录候选。下拉里摆一列预置名称会让
+            操作员以为只能从中挑选，实际这个字段就是发给上游的 model 参数，
+            任意字符串都合法。去掉预置列表后规则只剩一条：想接什么模型就写
+            什么名字。
+
+            保留 @change 的作用：输入框每次失焦/回车时，若名字正好对得上内置
+            目录里的一条档案，仍然按档案补全上下文窗口 / 输出上限 / 维度 /
+            视觉能力——这是"顺手帮忙"，不是"只能这么填"。
           -->
           <div class="form-item">
             <label class="form-label required">{{ $t('model.modelName') }}</label>
-            <!--
-              没有内置目录时用纯输入框：TDesign 的 select 在零选项时会隐藏整个
-              浮层（hideEmptyPopup），连 creatable 的"创建"行也一并藏掉，于是
-              用户能打字、但没有任何方式提交，失焦后输入直接丢失。自定义
-              (OpenAI 兼容接口) 正是这种情况，所以那里根本填不进模型名。
-            -->
             <t-input
-              v-if="catalogModelOptions.length === 0"
               v-model="formData.modelName"
               :placeholder="getModelNamePlaceholder()"
               :disabled="formData.provider === 'weknoracloud' && wkcCredentialState !== 'configured'"
               clearable
               autocomplete="off"
               spellcheck="false"
-            />
-            <t-select
-              v-else
-              v-model="formData.modelName"
-              filterable
-              creatable
-              clearable
-              :placeholder="getModelNamePlaceholder()"
-              :disabled="formData.provider === 'weknoracloud' && wkcCredentialState !== 'configured'"
-              :popup-props="{ overlayClassName: 'wk-popover catalog-model-select-popup', overlayInnerStyle: matchTriggerWidth }"
-              @create="handleCatalogModelCreate"
               @change="handleCatalogModelChange"
-            >
-              <t-option v-for="opt in catalogModelOptions" :key="opt.value" :value="opt.value" :label="opt.label"
-                :show-overflow-tooltip="false">
-                <div class="catalog-model-option">
-                  <span class="catalog-model-option__name">{{ opt.label }}</span>
-                  <span v-if="opt.value !== opt.label" class="catalog-model-option__id">{{ opt.value }}</span>
-                  <span class="catalog-model-option__badges">
-                    <span v-if="opt.contextWindow" class="catalog-badge">{{ opt.contextWindow }}</span>
-                    <span v-if="opt.dimension" class="catalog-badge">{{ $t('model.editor.dimensionLabel') }} {{ opt.dimension }}</span>
-                    <span v-if="opt.reasoning" class="catalog-badge catalog-badge--accent">{{ $t('model.editor.catalog.reasoning') }}</span>
-                    <span v-if="opt.vision" class="catalog-badge catalog-badge--accent">{{ $t('model.editor.catalog.vision') }}</span>
-                  </span>
-                </div>
-              </t-option>
-            </t-select>
-            <p v-if="catalogModelOptions.length > 0" class="form-desc">{{ $t('model.editor.catalog.hint') }}</p>
+            />
           </div>
 
           <div class="form-item">
@@ -1024,15 +956,54 @@ const applyCatalogEntry = (entry: ModelCatalogEntry) => {
   }
 }
 
+/**
+ * 归还目录为「上一个模型」自动填进去的值。
+ *
+ * 为什么需要：applyCatalogEntry 只填空字段，所以从 WeMM-Embedding-2B
+ * （维度 2048）改成手输的自定义模型名后，2048 会留在维度字段里被存进库。
+ * 上游真实维度如果不是 2048，第一次向量化就会报维度不匹配——而且这个
+ * 错误发生在建库之后，排查成本很高。
+ *
+ * 只回收「值仍然等于当初填进去的那个」的字段：操作员自己敲的数字是他的，
+ * 不能因为改了模型名就被抹掉。这与 resetModelSelectionForVendor 收尾逻辑
+ * 一致，只是触发时机从「换厂商」扩展到「换模型」。
+ */
+const releaseCatalogFilled = () => {
+  const filled = catalogFilled.value
+  if (filled.contextWindow && formData.value.contextWindow === filled.contextWindow) {
+    formData.value.contextWindow = undefined
+  }
+  if (filled.maxOutputTokens && formData.value.maxOutputTokens === filled.maxOutputTokens) {
+    formData.value.maxOutputTokens = undefined
+  }
+  if (filled.dimension && formData.value.dimension === filled.dimension) {
+    formData.value.dimension = undefined
+  }
+  if (filled.supportsVision && formData.value.supportsVision) {
+    formData.value.supportsVision = false
+  }
+  if (activeModelType.value === 'embedding') dropEmbeddingInputOverride()
+  catalogFilled.value = {}
+}
+
 const handleCatalogModelCreate = (value: string | number | boolean | bigint) => {
-  formData.value.modelName = String(value ?? '').trim()
+  const name = String(value ?? '').trim()
+  // 自定义名字不在目录里，任何「目录为旧模型填的值」都不再适用。
+  if (!findCatalogEntry(name)) releaseCatalogFilled()
+  formData.value.modelName = name
 }
 
 const handleCatalogModelChange = (value: unknown) => {
   const name = typeof value === 'string' ? value.trim() : ''
   if (!name) return
   const entry = findCatalogEntry(name)
-  if (entry) applyCatalogEntry(entry)
+  if (entry) {
+    applyCatalogEntry(entry)
+    return
+  }
+  // 改名成目录外的模型：先归还上一个模型带出来的值，再让下面的检测按钮
+  // 去问上游真实维度，而不是沿用别人的数字。
+  releaseCatalogFilled()
 }
 
 // 接入诊断（只读）：厂商 / 模型名 / Base URL / 协议覆盖变化后 400ms 防抖调用目录解析
@@ -1274,7 +1245,6 @@ const dimensionMessage = ref('')
 // Ollama 模型状态
 const ollamaModelList = ref<OllamaModelInfo[]>([])
 const loadingOllamaModels = ref(false)
-const searchKeyword = ref('')
 const downloading = ref(false)
 const downloadProgress = ref(0)
 const currentDownloadModel = ref('')
@@ -1445,25 +1415,6 @@ const checkOllamaServiceStatus = async () => {
   }
 }
 
-// 打开Ollama设置窗口
-const goToOllamaSettings = async () => {
-  console.log('点击跳转到Ollama设置按钮')
-  // 关闭当前弹窗
-  emit('update:visible', false)
-
-  // 先关闭设置弹窗（如果已打开）
-  if (uiStore.showSettingsModal) {
-    uiStore.closeSettings()
-    // 等待 DOM 更新
-    await nextTick()
-  }
-
-  // 打开设置窗口并直接跳转到Ollama设置
-  console.log('调用uiStore.openSettings')
-  uiStore.openSettings('ollama')
-  console.log('uiStore.openSettings调用完成')
-}
-
 // 上一次打开时的 modelData id：用来判断切换模型/新增 vs. 同一次新增的连续打开
 const lastOpenedModelId = ref<string | null>(null)
 
@@ -1624,7 +1575,6 @@ const resetForm = () => {
   catalogFilled.value = {}
   advancedOpen.value = false
   saveError.value = ''
-  searchKeyword.value = ''
   invalidateConnectionTest(false)
   resolveRevision++
   if (resolveTimer) {
@@ -1664,21 +1614,7 @@ const resetModelSelectionForVendor = () => {
   formData.value.modelName = ''
   // Take back only the values applyCatalogEntry put there; a number the
   // operator typed is theirs and survives the switch.
-  const filled = catalogFilled.value
-  if (filled.contextWindow && formData.value.contextWindow === filled.contextWindow) {
-    formData.value.contextWindow = undefined
-  }
-  if (filled.maxOutputTokens && formData.value.maxOutputTokens === filled.maxOutputTokens) {
-    formData.value.maxOutputTokens = undefined
-  }
-  if (filled.dimension && formData.value.dimension === filled.dimension) {
-    formData.value.dimension = undefined
-  }
-  if (filled.supportsVision && formData.value.supportsVision) {
-    formData.value.supportsVision = false
-  }
-  if (activeModelType.value === 'embedding') dropEmbeddingInputOverride()
-  catalogFilled.value = {}
+  releaseCatalogFilled()
   modelChecked.value = false
   modelAvailable.value = false
   dimensionChecked.value = false
@@ -1730,31 +1666,9 @@ const removeCustomHeader = (idx: number) => {
   formData.value.customHeaders.splice(idx, 1)
 }
 
-// 过滤后的模型列表
-const filteredOllamaModels = computed(() => {
-  if (!searchKeyword.value) return ollamaModelList.value
-  return ollamaModelList.value.filter(model =>
-    model.name.toLowerCase().includes(searchKeyword.value.toLowerCase())
-  )
-})
-
-// 是否显示"下载模型"选项
-const showDownloadOption = computed(() => {
-  if (!searchKeyword.value.trim()) return false
-  // 检查搜索词是否已存在于模型列表中
-  const exists = ollamaModelList.value.some(model =>
-    model.name.toLowerCase() === searchKeyword.value.toLowerCase()
-  )
-  return !exists
-})
-
-// 自定义过滤逻辑（捕获搜索关键词）
-const handleModelFilter = (filterWords: string) => {
-  searchKeyword.value = filterWords
-  return true // 让 TDesign 使用我们的 filteredOllamaModels
-}
-
-// 加载 Ollama 模型列表
+// 加载 Ollama 模型列表。
+// 模型名输入框已改成纯文本，但下载流程仍然需要这份列表来判断
+// 「已下载 / 需要下载」，所以这里保留。
 const loadOllamaModels = async () => {
   // 只在选择 local 来源时加载
   if (formData.value.source !== 'local') return
@@ -1769,27 +1683,6 @@ const loadOllamaModels = async () => {
   } finally {
     loadingOllamaModels.value = false
   }
-}
-
-// 刷新模型列表
-const refreshOllamaModels = async () => {
-  ollamaModelList.value = [] // 清空以强制重新加载
-  await loadOllamaModels()
-  MessagePlugin.success(t('model.editor.listRefreshed'))
-}
-
-// 监听下拉框可见性变化
-const handleDropdownVisibleChange = (visible: boolean) => {
-  if (!visible) {
-    searchKeyword.value = ''
-  }
-}
-
-// 格式化模型大小
-const formatModelSize = (bytes: number): string => {
-  if (!bytes || bytes === 0) return ''
-  const gb = bytes / (1024 * 1024 * 1024)
-  return gb >= 1 ? `${gb.toFixed(1)} GB` : `${(bytes / (1024 * 1024)).toFixed(0)} MB`
 }
 
 // 检查模型状态（Ollama本地模型）
@@ -2212,7 +2105,6 @@ watch(() => formData.value.source, () => {
   dimensionMessage.value = ''
 
   // 清理下载状态
-  searchKeyword.value = ''
   if (downloadInterval) {
     clearInterval(downloadInterval)
     downloadInterval = null
@@ -2808,6 +2700,26 @@ const handleCancel = () => {
   }
 }
 
+/*
+  模型名下拉底部的「可以自己输入」提示条。
+  它不是可点选项（TDesign 的 creatable 会另外生成一条真正的选项），
+  只负责让「这个字段支持手输」这件事可见——之前用户以为只能下拉。
+*/
+.catalog-model-custom-hint {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  border-top: 1px solid var(--td-component-stroke);
+  color: var(--td-text-color-placeholder);
+  font-size: var(--app-text-xs);
+  line-height: 18px;
+
+  .t-icon {
+    font-size: var(--app-text-sm);
+  }
+}
+
 // 接入诊断面板：只读、浅底，避免与可编辑字段混淆
 .resolved-panel {
   padding: 10px 12px;
@@ -2915,70 +2827,6 @@ const handleCancel = () => {
   display: flex;
   align-items: center;
   gap: 8px;
-}
-
-// Ollama不可用提示样式
-.ollama-unavailable-tip {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  margin-top: 12px;
-  padding: 10px 12px;
-  background: var(--td-error-color-light);
-  border: 1px solid var(--td-error-color-focus);
-  border-radius: var(--app-radius-md);
-  font-size: var(--app-text-md);
-
-  .tip-icon {
-    color: var(--td-error-color);
-    font-size: var(--app-text-xl);
-    flex-shrink: 0;
-    margin-right: 2px;
-
-    &.info {
-      color: var(--td-brand-color);
-    }
-  }
-
-  .tip-text {
-    color: var(--td-error-color);
-    flex: 1;
-    line-height: 1.5;
-  }
-
-  :deep(.tip-link) {
-    color: var(--td-brand-color);
-    font-size: var(--app-text-md);
-    font-weight: 500;
-    padding: 4px 6px 4px 10px !important;
-    min-height: auto !important;
-    height: auto !important;
-    line-height: 1.4 !important;
-    text-decoration: none;
-    white-space: nowrap;
-    display: inline-flex !important;
-    align-items: center !important;
-    gap: 1px;
-    border-radius: var(--app-radius-xs);
-    transition: all var(--app-motion-base) ease;
-
-    &:hover {
-      background: color-mix(in srgb, var(--td-brand-color) 8%, transparent) !important;
-      color: var(--td-brand-color-active) !important;
-    }
-
-    &:active {
-      background: color-mix(in srgb, var(--td-brand-color) 12%, transparent) !important;
-    }
-
-    .t-icon {
-      font-size: var(--app-text-base) !important;
-      margin: 0 !important;
-      line-height: 1 !important;
-      display: inline-flex !important;
-      align-items: center !important;
-    }
-  }
 }
 
 // Destructive-action checkbox for "Remove this credential". Styled to match

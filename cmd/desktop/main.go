@@ -30,11 +30,14 @@ import (
 	"github.com/Tencent/WeKnora/internal/config"
 	"github.com/Tencent/WeKnora/internal/container"
 	"github.com/Tencent/WeKnora/internal/handler"
+	sessionhandler "github.com/Tencent/WeKnora/internal/handler/session"
 	"github.com/Tencent/WeKnora/internal/logger"
 	"github.com/Tencent/WeKnora/internal/runtime"
 	"github.com/Tencent/WeKnora/internal/stream"
 	"github.com/Tencent/WeKnora/internal/types/interfaces"
+
 	wailsruntime "github.com/wailsapp/wails/v2/pkg/runtime"
+	"go.uber.org/dig"
 )
 
 // dragHandlerJS is injected into the webview on DomReady.
@@ -65,17 +68,25 @@ window.addEventListener('dragstart', function(e){
   e.preventDefault();
 }, true);
 
+// OEM：顶部拖动回退只在「内嵌标题栏」模式下才启用。
+// TitleBarHiddenInset 时 FullSizeContent=true，webview 铺满整个窗口，
+// 最上面 40px 没有原生标题栏可拖，所以需要这个 Y 位置回退；
+// 换成 TitleBarDefault 后系统标题栏独占顶部，webview 从标题栏下方开始，
+// 此时若仍启用回退，会把内容区顶部的按钮/输入框误判成拖动区。
+// 运行时由 Go 侧注入 __WK_EMBEDDED_TITLEBAR__（见 desktopTitlebarModeJS）。
+var EMBEDDED_TITLEBAR = (window.__WK_EMBEDDED_TITLEBAR__ === true);
+
 var TITLEBAR_H=40;
 
 // We specifically look for Wails' inline style attributes injected by Vue,
 // and custom drag classes, avoiding generic headers like .section-header.
 // .chat-topbar is the window top on the conversation page.
-var dragSel='.logo_row,.menu_top,.chat-topbar,.drag-region,[data-wails-drag],' +
+var dragSel='.logo_row,.sidebar_winctl,.menu_top,.chat-topbar,.drag-region,[data-wails-drag],' +
   '[style*="--wails-draggable: drag"],[style*="--wails-draggable:drag"]';
 
 var noDragSel='button,a,input,select,textarea,[role="button"],' +
   '.t-button,.t-input,.t-select,.t-textarea,' +
-  '.header-actions,.header-action-btn,.sidebar-toggle,.logo_box,' +
+  '.header-actions,.header-action-btn,.sidebar-toggle,.logo_actions,.logo_box,' +
   '.close-btn,.menu_item,.submenu,.submenu_item,.menu_bottom,' +
   '.t-popup,.t-dropdown,.t-tooltip,.t-dialog,[data-no-drag],' +
   '[style*="--wails-draggable: no-drag"],[style*="--wails-draggable:no-drag"]';
@@ -99,6 +110,8 @@ function isLayoutEl(el){
 }
 
 function inTitlebar(el,y){
+  // 原生标题栏模式下顶部由系统接管，不再做 Y 位置回退。
+  if(!EMBEDDED_TITLEBAR)return false;
   if(y>TITLEBAR_H)return false;
   var node=el;
   while(node&&node instanceof Element){
@@ -174,9 +187,15 @@ window.open=function(url){
 })();`
 
 // wailsThemeSyncJS：与 index.html 首屏一致，在 DomReady 再跑一遍，覆盖 Ctrl+R 后 runtime 就绪时机
-const wailsThemeSyncJS = `(function(){try{var t=localStorage.getItem('WeKnora_theme')||'light';if(t==='system')t=window.matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light';var bg=t==='dark'?'#181818':'#eee';document.documentElement.setAttribute('theme-mode',t);document.documentElement.style.background=bg;document.documentElement.style.minHeight='100%';document.documentElement.style.colorScheme=t==='dark'?'dark':'light';if(document.body){document.body.style.background=bg;document.body.style.minHeight='100%';}var w=window.runtime;if(!w)return;if(t==='dark'){if(w.WindowSetDarkTheme)w.WindowSetDarkTheme();if(w.WindowSetBackgroundColour)w.WindowSetBackgroundColour(24,24,24,255);}else{if(w.WindowSetLightTheme)w.WindowSetLightTheme();if(w.WindowSetBackgroundColour)w.WindowSetBackgroundColour(238,238,238,255);}}catch(e){}})()`
+// OEM：告诉注入脚本当前标题栏形态，决定是否启用「顶部 40px 拖动」回退。
+//
+// HiddenInset 下 FullSizeContent=true，webview 铺满整个窗口，顶部 40px 没有
+// 原生标题栏可拖，必须靠这个 Y 位置回退才有「拖空白处移动窗口」的体验。
+// 若将来换成 TitleBarDefault（原生标题栏），把它改成 false，
+// 否则内容区顶部会被误判成拖动区。
+const desktopTitlebarModeJS = `try{window.__WK_EMBEDDED_TITLEBAR__=true}catch(e){}`
 
-const weknoraGitHubRepoURL = "https://github.com/Tencent/WeKnora"
+const wailsThemeSyncJS = `(function(){try{var t=localStorage.getItem('WeKnora_theme')||'light';if(t==='system')t=window.matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light';var bg=t==='dark'?'#181818':'#eee';document.documentElement.setAttribute('theme-mode',t);document.documentElement.style.background=bg;document.documentElement.style.minHeight='100%';document.documentElement.style.colorScheme=t==='dark'?'dark':'light';if(document.body){document.body.style.background=bg;document.body.style.minHeight='100%';}var w=window.runtime;if(!w)return;if(t==='dark'){if(w.WindowSetDarkTheme)w.WindowSetDarkTheme();if(w.WindowSetBackgroundColour)w.WindowSetBackgroundColour(24,24,24,255);}else{if(w.WindowSetLightTheme)w.WindowSetLightTheme();if(w.WindowSetBackgroundColour)w.WindowSetBackgroundColour(238,238,238,255);}}catch(e){}})()`
 
 // ensureDesktopLiteEdition marks this process as Lite. cmd/desktop is the
 // Lite app; packaged builds also inject this via ldflags. wails dev often
@@ -184,6 +203,27 @@ const weknoraGitHubRepoURL = "https://github.com/Tencent/WeKnora"
 // the string. Host sandbox is gated by the desktop build tag, not this.
 func ensureDesktopLiteEdition() {
 	handler.Edition = "lite"
+}
+
+// desktopWindowTitle 组装原生标题栏文案：「应用名 v版本号」。
+//
+// 版本号的三级回退（顺序即优先级）：
+//  1. desktopVersion —— 由 desktop_webdir.go 里 go:embed 的 VERSION 文件填充，
+//     编译期就进二进制，不依赖运行时 cwd，打包后也一定拿得到。
+//  2. desktopAboutVersion() —— handler.Version（ldflags 注入）或运行时读 VERSION 文件，
+//     兼容直接跑二进制调试的场景。
+//  3. 都没有就只显示应用名，绝不出现 "vunknown" 这种丑陋文案。
+func desktopWindowTitle() string {
+	const appName = "国研智研体"
+	v := strings.TrimSpace(desktopVersion)
+	if v == "" || v == "unknown" {
+		v = strings.TrimSpace(desktopAboutVersion())
+	}
+	if v == "" || v == "unknown" {
+		return appName
+	}
+	// VERSION 文件里可能已经带 v 前缀，避免出现 "vv0.9.0"
+	return appName + " v" + strings.TrimPrefix(v, "v")
 }
 
 func main() {
@@ -213,6 +253,28 @@ func main() {
 	}
 	configureDesktopStorage(execPath)
 	configureDesktopFileStorage(execPath)
+	configureDesktopSSRFWhitelist()
+	reportDesktopWriteSanity()
+
+	// OEM 修复：让进程内的 Gin 也提供前端静态文件。
+	//
+	// 为什么必须这么做：Wails 的 AssetServer.Handler 指向一个把请求反向代理到
+	// 本进程 Gin 的反代，所以窗口里的 "/" 实际打到 Gin。而 Gin 只有在设置了
+	// WEKNORA_WEB_DIR 时才注册静态路由（internal/router/static.go:19-27）。
+	// 不设的后果是连锁的：
+	//   "/" 落到全局鉴权中间件 → 401 JSON
+	//   → Wails 只在 200 && text/html 时才往 HTML 里注入 /wails/runtime.js
+	//     （pkg/assetserver/assetserver.go 的 doRecord 判断）
+	//   → window.go 不存在 → 前端 autoSetup() 拿不到 setup token
+	//   → 永远停在 {"error":"Unauthorized: missing authentication"}
+	// 桌面版的资源根就是上面 chdir 进去的 Resources 目录，前端放在 ./web。
+	// 显式设置了 WEKNORA_WEB_DIR 时尊重外部配置（wails dev 会把前端放在别处）。
+	if strings.TrimSpace(os.Getenv("WEKNORA_WEB_DIR")) == "" {
+		if webDir, ok := resolveDesktopWebDir(hasConfigRoot); ok {
+			_ = os.Setenv("WEKNORA_WEB_DIR", webDir)
+		}
+	}
+
 	logger.ConfigureFromEnv()
 
 	// Set Gin mode
@@ -237,8 +299,33 @@ func main() {
 	container.SetHostApprovalModeLoader(LoadApprovalMode)
 	container.SetHostProjectDirsLoader(LoadProjectDirs)
 
+	// 授权服务必须在 BuildContainer 之前初始化：
+	// BuildContainer 内部会 Provide 一个 *licenser.Service 的默认值（nil），
+	// 而授权状态是容器装配时就该确定的——路由中间件在装配阶段拿到的
+	// 实例会一直用下去，装配后再替换就需要额外的同步。
+	//
+	// 先把实例算出来放进容器可覆盖的位置：这里直接构造后通过
+	// container.SetLicenseService 交给容器（见下方 provide 覆盖）。
+	// 内置技能：管理端发布包里的技能在安装包里是纯资源目录，
+	// 启动时按版本装进 ~/.weknora/skills，沙箱与 agent 才看得见。
+	installBundledSkills(context.Background(), configRoot, hasConfigRoot)
+
+	licenseService := setupDesktopLicense()
+	container.SetLicenseServiceOverride(licenseService)
+
 	// Build dependency injection container
 	c := container.BuildContainer(runtime.GetContainer())
+
+	// 桌面端把默认账号提升为系统管理员。
+	//
+	// 「全局运行时设置」页（SSRF 白名单、模型并发上限等）只对系统管理员
+	// 可见。桌面端是单用户产品：注册出来的账号虽然是自己工作空间的 owner，
+	// 却没有 is_system_admin 标志，于是用户在自己电脑上被告知「无权访问」。
+	//
+	// cmd/server 走的是 runStartupBootstrap，桌面端不经过那条路径，所以在
+	// 这里直接调用同一套逻辑。只在「当前没有任何系统管理员」时才提升，
+	// 幂等且非致命。
+	promoteDesktopDefaultAdmin(c)
 
 	// Initialize the WeKnora App struct
 	app := NewApp()
@@ -249,6 +336,15 @@ func main() {
 	app.setupToken = base64.RawURLEncoding.EncodeToString(setupBytes)
 	handler.SetLiteSetupToken(app.setupToken)
 	handler.SetHostProjectPicker(app.PickProjectDir)
+	// 授权目录的列出与撤销。撤销必须走 HTTP，因为反向代理下的 SPA
+	// 调不到 Wails 绑定；没有它用户就永远无法收回已授予的目录访问权。
+	handler.SetHostProjectDirStore(LoadProjectDirs, removeApprovedProjectDir)
+	// 「在文件管理器中打开」。同样必须走 HTTP：反向代理下的 SPA 拿不到
+	// Wails 绑定，而 window.open("file://…") 会被 WKWebView 拒绝。
+	handler.SetHostProjectDirRevealer(RevealApprovedProjectDir)
+	// @ 引用项目文件：把磁盘上的文件登记成会话附件。边界校验必须复用
+	// 同一份授权目录列表，所以由这里把 matcher 注入 session handler。
+	sessionhandler.SetApprovedProjectPathMatcher(handler.MatchApprovedProjectPath)
 
 	// Error channel to capture server startup errors
 	serverErrCh := make(chan error, 1)
@@ -265,12 +361,22 @@ func main() {
 
 			runtime.LogGinRouteCount(context.Background())
 
-			// 127.0.0.1 + saved port from settings (desktop-prefs.json), or :0 for random free port.
+			// 127.0.0.1 + 固定端口（prefs 可覆盖），保证双击启动后地址稳定。
 			addr := desktopBackendListenAddr()
 
-			listener, err := listenWithRetry(addr, 10, 300*time.Millisecond)
+			// 固定端口被别的东西长期占用时，不能让程序起不来——用户双击
+			// 图标只期待「窗口出现」。重试几次仍失败就退回内核随机端口，
+			// 页面内的所有请求都走 window.__WEKNORA_API_BASE__，端口变了
+			// 前端也不需要改。
+			listener, err := listenWithRetry(addr, 6, 300*time.Millisecond)
 			if err != nil {
-				return fmt.Errorf("failed to start server: %v", err)
+				logger.Warnf(context.Background(),
+					"Preferred port %s unavailable (%v); falling back to an ephemeral port", addr, err)
+				host, _, _ := net.SplitHostPort(addr)
+				listener, err = net.Listen("tcp", net.JoinHostPort(host, "0"))
+				if err != nil {
+					return fmt.Errorf("failed to start server: %v", err)
+				}
 			}
 
 			tcpAddr := listener.Addr().(*net.TCPAddr)
@@ -339,24 +445,20 @@ func main() {
 	// Create application with options
 	// macOS app menu
 	AppMenu := menu.NewMenu()
-	FileMenu := AppMenu.AddSubmenu("WeKnora Lite")
-	FileMenu.AddText("About WeKnora", keys.CmdOrCtrl("i"), func(_ *menu.CallbackData) {
+	FileMenu := AppMenu.AddSubmenu("国研智研体")
+	FileMenu.AddText("About 国研智研体", keys.CmdOrCtrl("i"), func(_ *menu.CallbackData) {
 		if app.ctx == nil {
 			return
 		}
-		choice, err := wailsruntime.MessageDialog(app.ctx, wailsruntime.MessageDialogOptions{
+		_, err := wailsruntime.MessageDialog(app.ctx, wailsruntime.MessageDialogOptions{
 			Type:          wailsruntime.InfoDialog,
-			Title:         "WeKnora Lite",
-			Message:       fmt.Sprintf("WeKnora Lite — Desktop Edition\n\nA RAG framework for document understanding and semantic Q&A over complex, heterogeneous content.\n\nVersion %s\n© 2026 Tencent\n\nGitHub:\n%s", desktopAboutVersion(), weknoraGitHubRepoURL),
-			Buttons:       []string{"Open GitHub", "OK"},
+			Title:         "国研智研体",
+			Message:       fmt.Sprintf("国研智研体 — 桌面版\n\n企业知识库与智能问答一体化平台。\n\nVersion %s\n© 2026", desktopAboutVersion()),
+			Buttons:       []string{"OK"},
 			DefaultButton: "OK",
 		})
 		if err != nil {
 			logger.Warnf(context.Background(), "About dialog: %v", err)
-			return
-		}
-		if choice == "Open GitHub" {
-			wailsruntime.BrowserOpenURL(app.ctx, weknoraGitHubRepoURL)
 		}
 	})
 	FileMenu.AddText("Check for Updates...", nil, func(_ *menu.CallbackData) {
@@ -387,7 +489,7 @@ func main() {
 	// Start Wails application
 	// We use a Reverse Proxy to seamlessly proxy Wails' frontend to our Go backend
 	err := wails.Run(&options.App{
-		Title:         "WeKnora Lite",
+		Title:         desktopWindowTitle(),
 		Width:         1280,
 		Height:        800,
 		DisableResize: false,
@@ -398,6 +500,14 @@ func main() {
 		StartHidden: false, // Show window on startup
 		OnStartup:   app.startup,
 		OnDomReady: func(ctx context.Context) {
+			// OEM：内嵌标题栏下系统标题栏被隐藏，版本号改由侧栏品牌区展示，
+			// 这里把版本号注入页面，供 frontend/src/components/menu.vue 读取。
+			wailsruntime.WindowSetTitle(ctx, desktopWindowTitle())
+			wailsruntime.WindowExecJS(ctx, desktopTitlebarModeJS)
+			if v := strings.TrimSpace(desktopVersion); v != "" && v != "unknown" {
+				injectVersion := fmt.Sprintf(`try{window.__WK_APP_VERSION__=%s}catch(e){}`, strconv.Quote(strings.TrimPrefix(v, "v")))
+				wailsruntime.WindowExecJS(ctx, injectVersion)
+			}
 			wailsruntime.WindowExecJS(ctx, wailsThemeSyncJS)
 			wailsruntime.WindowExecJS(ctx, dragHandlerJS)
 			// 注入真实 API 根路径（与 window.location.origin 不同）；无 Go 绑定时仍可显示。
@@ -417,6 +527,12 @@ func main() {
 		},
 		BackgroundColour: &options.RGBA{R: 255, G: 255, B: 255, A: 255},
 		Mac: &mac.Options{
+			// OEM：回到内嵌标题栏（HiddenInset）。红黄绿按钮由系统绘制在窗口
+			// 左上角、浮在 webview 之上，因此侧栏顶部必须预留一块空白给它，
+			// 由 frontend/src/components/menu.vue 的
+			// html.wails-desktop .aside_box { padding-top } 负责让位。
+			// 不使用原生标题栏（TitleBarDefault）是为了保持无边框的极简观感；
+			// 代价是应用名/版本号改由侧栏品牌区展示，不再出现在系统标题栏。
 			TitleBar:             mac.TitleBarHiddenInset(),
 			WebviewIsTransparent: false,
 			WindowIsTranslucent:  false,
@@ -425,6 +541,62 @@ func main() {
 	if err != nil {
 		println("Error:", err.Error())
 	}
+}
+
+// configureDesktopSSRFWhitelist 让桌面端可以直连本机（loopback）上运行的
+// 模型服务，例如 ollama / vLLM / LM Studio 之类监听 127.0.0.1:xxxx 的
+// OpenAI 兼容端点。
+//
+// 为什么桌面端要单独放开：
+//
+//	SSRF 防护针对的是「多租户服务端拿到用户填的 URL 就可能被诱导访问内网」，
+//	而桌面端只有一个用户，127.0.0.1 就是他自己的电脑，本机上不存在「被
+//	越权访问的内网资源」这一前提。
+//
+// 实现方式沿用仓库既有的 SSRF_WHITELIST_EXTRA 语义（见
+// internal/utils/security.go 的 loadSSRFWhitelist）：它是「叠加」而非
+// 「覆盖」，用户自己在设置里配的白名单不受影响。只在变量为空时写入默认值，
+// 让操作员仍可用环境变量整体接管。
+// promoteDesktopDefaultAdmin 确保桌面端的默认账号是系统管理员。
+//
+// 复用 config.AutomaticModelConfig 之外的既有约定：桌面端首次注册固定
+// 使用 admin@weknora.local。提升动作交给 UserService，失败只记日志不阻断
+// 启动——一个没有系统管理员的桌面端仍然能正常问答，只是看不到几个设置页。
+func promoteDesktopDefaultAdmin(c *dig.Container) {
+	ctx := context.Background()
+	if err := c.Invoke(func(userSvc interfaces.UserService) {
+		user, err := userSvc.GetUserByEmail(ctx, desktopDefaultAdminEmail)
+		if err != nil || user == nil {
+			// 首次启动时用户尚未注册，下次启动会再试一次。
+			return
+		}
+		if user.IsSystemAdmin {
+			return
+		}
+		// 已经有别的系统管理员时不抢权限，保持与 cmd/server 的语义一致。
+		if _, total, err := userSvc.ListSystemAdmins(ctx, 0, 1); err == nil && total > 0 {
+			return
+		}
+		user.IsSystemAdmin = true
+		if err := userSvc.UpdateUser(ctx, user); err != nil {
+			logger.Warnf(ctx, "[desktop] promote %s to system admin failed: %v", user.Email, err)
+			return
+		}
+		logger.Infof(ctx, "[desktop] promoted %s (%s) to system admin", user.Username, user.Email)
+	}); err != nil {
+		logger.Warnf(ctx, "[desktop] system admin bootstrap unavailable: %v", err)
+	}
+}
+
+// desktopDefaultAdminEmail 是桌面端首次注册时使用的默认账号邮箱。
+const desktopDefaultAdminEmail = "admin@weknora.local"
+
+func configureDesktopSSRFWhitelist() {
+	if strings.TrimSpace(os.Getenv("SSRF_WHITELIST_EXTRA")) != "" {
+		return
+	}
+	// IPv6 用不带方括号的裸地址，与 net.ParseIP / Hostname() 的返回一致。
+	_ = os.Setenv("SSRF_WHITELIST_EXTRA", "127.0.0.1,localhost,::1")
 }
 
 func configureDesktopStorage(execPath string) {
@@ -457,6 +629,16 @@ func configureDesktopStorage(execPath string) {
 // /data/files is not writable on macOS and is replaced. Uploads move over from
 // wherever the previous build kept them.
 func configureDesktopFileStorage(execPath string) {
+	// 便携模式：上传文件同样落在便携目录，避免依赖 ~/.weknora。
+	if portable := strings.TrimSpace(os.Getenv("WK_PORTABLE_DIR")); portable != "" {
+		filesPath := filepath.Join(portable, "files")
+		if err := os.MkdirAll(filesPath, 0o755); err != nil {
+			logger.Warnf(context.Background(), "Failed to create portable files directory %s: %v", filesPath, err)
+			return
+		}
+		_ = os.Setenv("LOCAL_STORAGE_BASE_DIR", filesPath)
+		return
+	}
 	home, err := os.UserHomeDir()
 	if err != nil {
 		logger.Warnf(context.Background(), "Failed to resolve home dir for file storage: %v", err)
@@ -528,12 +710,20 @@ func migrateDesktopFiles(oldDir, newDir string) {
 }
 
 func defaultMacAppSupportDir(execPath string) (string, error) {
+	// 便携模式：设置 WK_PORTABLE_DIR 后所有可写状态（数据库、上传文件、prefs、
+	// signing.key）都落在该目录下，不再依赖 ~/Library/Application Support。
+	// 该目录不可写的环境（沙箱、企业管控、只读家目录）里，默认路径会让程序
+	// 在启动阶段直接失败，因此这里优先认便携目录。
+	if portable := strings.TrimSpace(os.Getenv("WK_PORTABLE_DIR")); portable != "" {
+		return portable, nil
+	}
+
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
 		return "", err
 	}
 
-	appName := "WeKnora Lite"
+	appName := "国研智研体"
 	if idx := strings.Index(execPath, ".app/Contents/MacOS"); idx >= 0 {
 		bundleName := filepath.Base(execPath[:idx+4])
 		if trimmed := strings.TrimSuffix(bundleName, ".app"); trimmed != "" {
@@ -578,6 +768,17 @@ func isBrowserPairingRequest(req *http.Request) bool {
 
 // desktopBackendListenAddr returns the TCP address for the embedded Gin server (Wails desktop).
 // Binds 127.0.0.1 by default, or 0.0.0.0 when http_bind_public is set in desktop-prefs.json.
+// desktopDefaultHTTPPort 是双击启动时优先尝试的端口。
+//
+// 为什么需要它：原先无固定端口时监听 ":0"，由内核随机分配，每次启动
+// 端口都不同。用户把地址存成书签、或者从别的设备访问，下次就打不开了。
+// 选 8740 是因为它在用户端口段（1024-49151）内，且与本项目其他服务
+// （licadmin 8091、OCR 若干）都不冲突。
+//
+// 端口被占不算错误：listenWithRetry 会先重试，仍失败则上层回落随机端口，
+// 用户完全无感。
+const desktopDefaultHTTPPort = 8740
+
 func desktopBackendListenAddr() string {
 	host := "127.0.0.1"
 	if LoadDesktopHTTPBindPublic() {
@@ -587,7 +788,10 @@ func desktopBackendListenAddr() string {
 	if pref >= 1 && pref <= 65535 {
 		return net.JoinHostPort(host, strconv.Itoa(pref))
 	}
-	return net.JoinHostPort(host, "0")
+	// prefs 里没有固定端口时，优先用约定端口；被占用再由
+	// listenWithRetry 的重试逻辑失败，最后落到系统的随机端口。
+	// 这样「双击打开」每次拿到的地址是稳定的，书签和局域网访问不会失灵。
+	return net.JoinHostPort(host, strconv.Itoa(desktopDefaultHTTPPort))
 }
 
 // desktopPreferredLANIPv4 picks a non-loopback IPv4 for “other devices on this network” URL hints.
@@ -685,4 +889,44 @@ func listenWithRetry(addr string, maxRetries int, baseDelay time.Duration) (net.
 		}
 	}
 	return nil, lastErr
+}
+
+// reportDesktopWriteSanity 在启动时探测一次「本进程能不能写家目录」。
+//
+// 为什么需要它：macOS 上有两种完全不同的失败长得一模一样——
+//   - 内核 Seatbelt（sandbox-exec）拒绝 → shell_exec 与技能安装全废
+//   - 应用本身缺 TCC 授权 → 写 Desktop / 家目录报 operation not permitted
+//
+// 两者都会让技能安装、shell_exec、sandbox-exec 报同一句
+// "operation not permitted"，日志里看不出区别，排查全靠猜。
+//
+// 这里在 ~/.weknora 下建一个一次性探针文件，把结论写成一行明确的日志，
+// 让用户（和后续排障的人）一眼知道该修内核还是该授权。
+// 探针用完即删，不写也不删用户任何数据。
+func reportDesktopWriteSanity() {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		logger.Warnf(context.Background(), "[desktop] write sanity: cannot resolve home dir: %v", err)
+		return
+	}
+
+	stateDir := filepath.Join(home, ".weknora")
+	if err := os.MkdirAll(stateDir, 0o755); err != nil {
+		logger.Warnf(context.Background(),
+			"[desktop] write sanity: cannot create %s: %v — 技能安装与文件写入会失败，"+
+				"请确认应用已获得该目录的访问权限（系统设置 → 隐私与安全性 → 完全磁盘访问）",
+			stateDir, err)
+		return
+	}
+
+	probe := filepath.Join(stateDir, ".write-sanity-probe")
+	if err := os.WriteFile(probe, []byte("ok"), 0o644); err != nil {
+		logger.Warnf(context.Background(),
+			"[desktop] write sanity: FAILED writing %s: %v — 本进程被系统拒绝写入家目录，"+
+				"技能安装（.locks）与 shell_exec 都会报 operation not permitted",
+			probe, err)
+		return
+	}
+	_ = os.Remove(probe)
+	logger.Infof(context.Background(), "[desktop] write sanity: home directory is writable (%s)", stateDir)
 }

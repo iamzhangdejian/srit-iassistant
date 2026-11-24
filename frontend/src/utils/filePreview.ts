@@ -21,6 +21,9 @@ export type FilePreviewKind =
   | 'video'
   | 'mermaid'
   | 'epub'
+  // Legacy OLE2 Office binaries (.doc/.ppt/.xls). The browser previewers only
+  // parse OOXML, so these are converted to Markdown by the backend first.
+  | 'legacy'
   | 'unsupported'
 
 export type FilePreviewSniff = {
@@ -43,6 +46,11 @@ register('pdf', ['pdf'])
 // unsupported-preview state with a download entry instead.
 register('docx', ['docx'])
 register('pptx', ['pptx'])
+// Word 97-2003 / PowerPoint 97-2003 are OLE2 binaries: docx-preview and the
+// pptx renderer parse ZIP/XML and would fail with a raw zip error. The backend
+// converts them to Markdown (internal/handler/document_convert.go) instead.
+// `.xls` stays under 'excel' because SheetJS reads the BIFF format directly.
+register('legacy', ['doc', 'dot', 'ppt', 'pot'])
 register('image', [
   'jpg', 'jpeg', 'png', 'gif', 'bmp', 'webp', 'tiff', 'tif', 'svg', 'svgz',
   'ico', 'avif', 'apng', 'jfif', 'pjpeg', 'pjp', 'heic', 'heif',
@@ -220,6 +228,7 @@ const DEFAULT_EXT_BY_KIND: Record<FilePreviewKind, string> = {
   pdf: 'pdf',
   docx: 'docx',
   pptx: 'pptx',
+  legacy: 'doc',
   image: 'png',
   excel: 'csv',
   text: 'txt',

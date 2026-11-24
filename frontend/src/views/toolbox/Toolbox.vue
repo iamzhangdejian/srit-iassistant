@@ -87,7 +87,11 @@ const panel = ref<{ openAdd?: () => void } | null>(null)
 const counts = reactive<Partial<Record<ToolboxSection, number>>>({})
 const requestedSection = computed(() => typeof route.params.section === 'string' ? route.params.section : '')
 const sandboxId = computed(() => typeof route.query.sandboxId === 'string' ? route.query.sandboxId : '')
-const visibleItems = computed(() => TOOLBOX_ITEMS.filter((item) => canAccessToolboxSection(item.key, {
+// OEM: 插件市场只保留「技能管理」。
+// 原版的「浏览器连接」属于 BrowserSkill（网页自动化），已在后端
+// internal/router/router.go 的 FeatCutBrowserSkill 中关闭，这里同步隐藏入口。
+const OEM_TOOLBOX_TABS = new Set(['skills'])
+const visibleItems = computed(() => TOOLBOX_ITEMS.filter((item) => OEM_TOOLBOX_TABS.has(item.key)).filter((item) => canAccessToolboxSection(item.key, {
   currentTenantRole: authStore.currentTenantRole,
   canAccessAllTenants: authStore.canAccessAllTenants,
   hasRole: (role) => authStore.hasRole(role),

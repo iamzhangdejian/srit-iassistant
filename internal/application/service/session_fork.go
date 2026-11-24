@@ -310,7 +310,11 @@ func (s *SessionForkService) Fork(
 		// pin that resolves nowhere the moment the source ran a shared agent.
 		SandboxConfigTenantID: source.SandboxConfigTenantID,
 		HostWorkspaceDir:      source.HostWorkspaceDir,
-		ParentSessionID:       source.ID,
+		// The branch runs in the same host directory, so it belongs to the same
+		// project. Omitting it dropped branches into 「未归属项目的会话」 while
+		// their project files panel still read the inherited directory.
+		ProjectID:       source.ProjectID,
+		ParentSessionID: source.ID,
 		ForkedFromMessageID:   forkPoint.ID,
 		ForkBootstrap:         bootstrap,
 	}
@@ -434,6 +438,9 @@ func (s *SessionForkService) forkOnSharedMachine(
 		Title:           forkTitle(title, source.Title), Description: source.Description,
 		LastRequestState: source.LastRequestState,
 		SandboxConfigID:  source.SandboxConfigID, SandboxConfigTenantID: source.SandboxConfigTenantID,
+		// Same reason as the host-mode branch above: keep the branch inside its
+		// project even though this mode resolves files from the machine.
+		ProjectID:       source.ProjectID,
 		ParentSessionID: source.ID, ForkedFromMessageID: forkPoint.ID,
 	}
 	child := s.allocations.ForkAssignment(srcAssign, newID)

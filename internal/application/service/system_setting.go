@@ -100,6 +100,39 @@ type settingSpec struct {
 // safely runtime-tunable (no startup caching that would not honour
 // the new value, no in-memory state bound at init time we cannot
 // re-derive)".
+// runtimeSettingService 持有当前进程的 SystemSettingService 实例。
+//
+// 为什么需要这个包级访问器：sessionService 的构造函数已经有二十多个参数，
+// 为了读一个运行时设置再往里塞一个依赖，会把 NewSessionService 和所有
+// 调用点都搅一遍，收益远小于代价。SystemSettingService 在容器里是单例，
+// 进程启动时写一次即可。
+//
+// 只给「拿不到依赖、但需要在热路径上读运行时设置」的地方用；
+// 能通过构造注入拿到该服务的地方仍应显式注入。
+var runtimeSettingService interfaces.SystemSettingService
+
+// SetRuntimeSettingService 由容器构建阶段调用，登记进程级单例。
+func SetRuntimeSettingService(svc interfaces.SystemSettingService) {
+	runtimeSettingService = svc
+}
+
+// ResolveIntSetting 读取一个 int 类运行时设置，供没有依赖注入的地方调用。
+// 服务尚未登记时直接返回 def。
+func ResolveIntSetting(ctx context.Context, key, envName string, def int64) int64 {
+	if runtimeSettingService == nil {
+		return def
+	}
+	return runtimeSettingService.GetInt(ctx, key, envName, def)
+}
+
+// 运行时设置项的 key。集中定义，避免字面量散落在注册表、解析逻辑和测试里。
+const (
+	// settingKeyMaxAnswerTokens 控制对话主回答的输出上限（token）。
+	// 与 conversation.summary.max_completion_tokens 是两个独立的概念：
+	// 后者是后台摘要/画像的紧凑预算，前者是聊天里生成的主回答。
+	settingKeyMaxAnswerTokens = "conversation.max_answer_tokens"
+)
+
 var registry = map[string]settingSpec{
 	// NOTE: file.max_size_mb is intentionally NOT registered. Although
 	// the Go upload handlers accept a runtime override via
@@ -323,6 +356,18 @@ var registry = map[string]settingSpec{
 		Description: "后台任务（文档入库/富化）对单个模型的默认并发上限，按模型 ID 全副本共享。" +
 			"每次调用实时读取，修改后立即生效、无需重启。0 或负数表示关闭默认限制" +
 			"（各模型仍会尊重自身在模型管理里配置的上限）。仅影响后台任务，不影响交互式对话。",
+	},
+	// conversation.max_answer_tokens 是「对话主回答」的输出上限。
+	// 独立于 summary.max_completion_tokens（那是给文档摘要/画像用的紧凑预算）。
+	// 每次对话实时读取，修改后立即生效，不需要重启。
+	settingKeyMaxAnswerTokens: {
+		Type:     "int",
+		EnvName:  "CONVERSATION_MAX_ANSWER_TOKENS",
+		Default:  int64(config.DefaultAnswerMaxTokens),
+		Category: "worker",
+		Description: "对话回答的最大输出长度（token）。默认 16384，约一万两千字。" +
+			"只影响聊天里生成的主回答，不影响文档摘要、画像和建索引。" +
+			"每次对话实时读取，修改后立即生效、无需重启。设为 0 或负数时沿用配置文件里的值。",
 	},
 }
 

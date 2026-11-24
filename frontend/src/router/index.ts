@@ -1,15 +1,20 @@
 import { createRouter, createWebHistory } from 'vue-router'
 import { defineComponent } from 'vue'
 import type { RouteLocationNormalized } from 'vue-router'
+import { ensureLicenseStatus, useLicense } from '@/composables/useLicense'
 import { useAuthStore } from '@/stores/auth'
 import { useDeploymentCapabilitiesStore } from '@/stores/deploymentCapabilities'
 import { useSettingsStore } from '@/stores/settings'
-import { autoSetup, userInfoFromApi } from '@/api/auth'
 import type { DeploymentCapabilityKey } from '@/config/deploymentCapabilities'
 import { MessagePlugin } from 'tdesign-vue-next'
 import i18n from '@/i18n'
 import { normalizeSettingsSection } from '@/config/settingsRoute'
 import { isToolboxSection, toolboxLocation } from '@/config/toolbox'
+// OEM: 首页路由与登录后落地页
+import { OEM_HOME_ROUTE } from '@/config/oem'
+// 会话不再来自用户输入：存量 token 复原 / 桌面桥静默建号都收在这个模块里，
+// 登录页与守卫共用，避免两边各写一遍。
+import { ensureDesktopSession, hydrateSessionFromToken } from '@/utils/desktopSession'
 
 /** Lite /桌面 WebView 硬刷新时可能只打开 `/`，用 session 记住上次页面以便恢复 */
 const LITE_LAST_PATH_KEY = 'weknora_lite_last_path'
@@ -47,7 +52,8 @@ const router = createRouter({
   routes: [
     {
       path: "/",
-      redirect: "/platform/knowledge-bases",
+      // OEM: 首页直接进入对话页（系统主视图）
+      redirect: OEM_HOME_ROUTE,
     },
     {
       path: "/login",
@@ -55,18 +61,7 @@ const router = createRouter({
       component: () => import("../views/auth/Login.vue"),
       meta: { requiresAuth: false, requiresInit: false }
     },
-    // Embed chat is a separate entry (embed.html + embed-main.ts), not this SPA.
-    {
-      path: "/register",
-      name: "registerByInvite",
-      // Share-link landing page reuses the Login form: the same Vue
-      // component renders both modes and detects ?token=xxx on mount
-      // to switch into invite-register flow. Avoids a parallel page
-      // that would duplicate the OIDC / language-switch / styling
-      // surface for one extra field.
-      component: () => import("../views/auth/Login.vue"),
-      meta: { requiresAuth: false, requiresInit: false }
-    },
+    // 邀请注册入口已随账号密码登录一并移除：系统只认授权码。
     {
       path: "/onboarding/workspace",
       name: "workspaceOnboarding",
@@ -107,6 +102,12 @@ const router = createRouter({
           path: "settings",
           name: "settings",
           component: SettingsRouteOutlet,
+          meta: { requiresInit: true, requiresAuth: true }
+        },
+        {
+          path: "projects",
+          name: "projectList",
+          component: () => import("../views/project/ProjectList.vue"),
           meta: { requiresInit: true, requiresAuth: true }
         },
         {
@@ -236,52 +237,9 @@ const router = createRouter({
   ],
 });
 
-// 持久化 auto-setup / login 返回的认证信息到 store
-function persistLoginResponse(authStore: ReturnType<typeof useAuthStore>, response: any) {
-  const activeTenant = response.active_tenant || response.tenant
-  if (response.user && response.token) {
-    const homeTenantId = response.user.tenant_id ?? activeTenant?.id ?? ''
-    authStore.setUser(userInfoFromApi(response.user, homeTenantId))
-    authStore.setToken(response.token)
-    if (response.refresh_token) {
-      authStore.setRefreshToken(response.refresh_token)
-    }
-    if (activeTenant) {
-      authStore.setTenant({
-        id: String(activeTenant.id) || '',
-        name: activeTenant.name || '',
-        owner_id: response.user.id || '',
-        created_at: activeTenant.created_at || new Date().toISOString(),
-        updated_at: activeTenant.updated_at || new Date().toISOString()
-      })
-    } else {
-      authStore.setTenant(null)
-    }
-    if (Array.isArray(response.memberships)) {
-      authStore.setMemberships(response.memberships)
-    }
-  }
-}
-
-async function hydrateSessionFromToken(authStore: ReturnType<typeof useAuthStore>) {
-  const token = localStorage.getItem('weknora_token')
-  if (!token) return false
-
-  if (!authStore.token) {
-    authStore.setToken(token)
-  }
-
-  const storedRefreshToken = localStorage.getItem('weknora_refresh_token')
-  if (storedRefreshToken && !authStore.refreshToken) {
-    authStore.setRefreshToken(storedRefreshToken)
-  }
-
-  // /auth/me 的落库逻辑只在 auth store 里维护一份（user / tenant / memberships /
-  // capabilities），这里只负责先把 token 放进 store。请求本身与启动、侧栏共用去重。
-  return authStore.refreshFromAuthMe()
-}
-
-let autoSetupAttempted = false
+// 会话的建立与复原见 `@/utils/desktopSession`（登录页也用它）。
+// 这里不再有 auto-setup 的一次性开关：建号是幂等的，失败时登录页会给出
+// 「请通过桌面版应用启动」的提示，不需要守卫自己记住“试过了”。
 let liteDeepLinkRestoreDone = false
 
 // 路由守卫：检查认证状态和系统初始化状态
@@ -327,18 +285,39 @@ router.beforeEach(async (to, from, next) => {
       }
     }
     if (authStore.hasValidTenant) {
-      next('/platform/knowledge-bases')
+      next(OEM_HOME_ROUTE)
     } else {
       next()
     }
     return
   }
 
+  // 授权闸门：在认证判定之前先看授权状态。
+  //
+  // 未授权（或授权无效/已过期）时把用户送到登录页，由登录页自己把
+  // 「登录表单」替换成「授权码绑定表单」。没有单独的授权页：绑授权码
+  // 和登录在用户眼里是同一件事——「证明这台机器能用」。登录页同时承担
+  // 查看当前授权与续期（卡片底部的「本机授权」一行）。
+  const license = useLicense()
+  const licenseStatus = await ensureLicenseStatus()
+  const licenseBlocked =
+    license.enabled &&
+    licenseStatus.state !== 'valid' &&
+    licenseStatus.state !== 'grace' &&
+    licenseStatus.state !== 'readonly'
+  if (licenseBlocked) {
+    // 登录页是唯一的授权入口：放行 /login，其余一律送过去。
+    if (to.path !== '/login') {
+      next({ path: '/login', replace: true, query: to.query })
+      return
+    }
+  }
+
   // 如果访问的是登录页面或初始化页面，直接放行
   if (to.meta.requiresAuth === false || to.meta.requiresInit === false) {
     // 如果已登录用户访问登录页面，重定向到知识库列表页面
     if (to.path === '/login' && authStore.isLoggedIn) {
-      next(authStore.hasValidTenant ? '/platform/knowledge-bases' : '/onboarding/workspace')
+      next(authStore.hasValidTenant ? OEM_HOME_ROUTE : '/onboarding/workspace')
       return
     }
     next()
@@ -348,30 +327,15 @@ router.beforeEach(async (to, from, next) => {
   // 检查用户认证状态
   if (to.meta.requiresAuth !== false) {
     if (!authStore.isLoggedIn) {
-      const restored = await hydrateSessionFromToken(authStore)
-      if (restored) {
+      // 没有「登录」这一步：先用存量 token 复原会话，不行就让桌面桥静默建号。
+      const ok = await ensureDesktopSession()
+      if (ok) {
         next(
           !authStore.hasValidTenant && to.meta.requiresTenant !== false
             ? '/onboarding/workspace'
             : to.fullPath,
         )
         return
-      }
-
-      if (!autoSetupAttempted) {
-        autoSetupAttempted = true
-        localStorage.removeItem('weknora_auto_setup_failed')
-        try {
-          const response = await autoSetup()
-          if (response.success) {
-            persistLoginResponse(authStore, response)
-            authStore.setLiteMode(true)
-            next(to.fullPath)
-            return
-          }
-        } catch {
-          // Auto-setup may be unavailable outside the native Lite shell.
-        }
       }
       next('/login')
       return
@@ -390,7 +354,7 @@ router.beforeEach(async (to, from, next) => {
   const requiredCapability = to.meta.requiredCapability as DeploymentCapabilityKey | undefined
   if (requiredCapability && !deploymentCapabilities.isSupported(requiredCapability)) {
     MessagePlugin.warning(i18n.global.t('settings.capabilityUnavailable'))
-    next('/platform/knowledge-bases')
+    next(OEM_HOME_ROUTE)
     return
   }
 
@@ -400,7 +364,7 @@ router.beforeEach(async (to, from, next) => {
   // the bounce. This is UI-only; the server enforces the real check.
   if (to.meta.requiresSystemAdmin === true) {
     if (!authStore.isSystemAdmin) {
-      next('/platform/knowledge-bases')
+      next(OEM_HOME_ROUTE)
       return
     }
   }

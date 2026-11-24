@@ -183,6 +183,16 @@ export const BUILTIN_QUICK_ANSWER_ID = 'builtin-quick-answer';
 export const BUILTIN_SMART_REASONING_ID = 'builtin-smart-reasoning';
 export const BUILTIN_WEKNORA_ASSISTANT_ID = 'builtin-weknora-assistant';
 
+/**
+ * 桌面版唯一的对话助手。
+ *
+ * 输入框不再提供模式/智能体选择，每次请求固定用这个 ID。它必须是
+ * AGENT_MODE_SMART_REASONING 的内置智能体（见 config/builtin_agents.yaml）：
+ * 快速问答走只读 RAG 管线，拿不到任何文件写入工具，模型只能把 Markdown
+ * 当正文吐出来，落不了盘。
+ */
+export const BUILTIN_MAIN_ASSISTANT_ID = 'builtin-main-assistant';
+
 // AgentMode 常量
 export const AGENT_MODE_QUICK_ANSWER = 'quick-answer';
 export const AGENT_MODE_SMART_REASONING = 'smart-reasoning';

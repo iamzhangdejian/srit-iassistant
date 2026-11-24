@@ -54,46 +54,6 @@ export interface LoginResponse {
   refresh_token?: string
 }
 
-export interface OIDCAuthURLResponse {
-  success: boolean
-  authorization_url?: string
-  state?: string
-  message?: string
-}
-
-export interface OIDCConfigResponse {
-  success: boolean
-  enabled: boolean
-  provider_display_name?: string
-  message?: string
-}
-
-// 用户注册接口
-export interface RegisterRequest {
-  username: string
-  email: string
-  password: string
-}
-
-export interface RegisterResponse {
-  success: boolean
-  message?: string
-  data?: {
-    user: {
-      id: string
-      username: string
-      email: string
-    }
-    tenant: {
-      id: string
-      name: string
-    }
-  }
-}
-
-// 用户偏好（与后端 types.UserPreferences 对齐，字段可选 = 没显式设置过）。
-// 新加 key 时记得：后端 service.UpdateUserPreferences 也要在 merge 分支里
-// 处理；前端调用方按需读 / 默认值降级。
 export interface UserPreferences {
   browser_search_instructions?: string | null
   // last_active_tenant_id 持久化「刷新 / 换设备 / 重新登录后回到上次的空间」
@@ -212,52 +172,6 @@ export interface ModelInfo {
 }
 
 /**
- * 用户登录
- */
-export async function login(data: LoginRequest): Promise<LoginResponse> {
-  try {
-    const response = await post('/api/v1/auth/login', data)
-    return response as unknown as LoginResponse
-  } catch (error: any) {
-    return {
-      success: false,
-      message: error.message || t('error.auth.loginFailed')
-    }
-  }
-}
-
-/**
- * 获取 OIDC 登录跳转地址
- */
-export async function getOIDCAuthorizationURL(redirectURI: string): Promise<OIDCAuthURLResponse> {
-  try {
-    const response = await get(`/api/v1/auth/oidc/url?redirect_uri=${encodeURIComponent(redirectURI)}`)
-    return response as unknown as OIDCAuthURLResponse
-  } catch (error: any) {
-    return {
-      success: false,
-      message: error.message || t('error.auth.loginFailed')
-    }
-  }
-}
-
-/**
- * 获取 OIDC 登录配置
- */
-export async function getOIDCConfig(): Promise<OIDCConfigResponse> {
-  try {
-    const response = await get('/api/v1/auth/oidc/config')
-    return response as unknown as OIDCConfigResponse
-  } catch (error: any) {
-    return {
-      success: false,
-      enabled: false,
-      message: error.message || t('error.auth.loginFailed')
-    }
-  }
-}
-
-/**
  * 获取认证配置（仅返回前端渲染需要的公开字段，例如注册模式）。
  *
  * 后端通过 `auth.registration_mode` 控制是否允许自助注册：
@@ -279,21 +193,6 @@ export async function getAuthConfig(): Promise<AuthConfigResponse> {
     return response as unknown as AuthConfigResponse
   } catch {
     return { success: false, registration_mode: '', complex_password_enabled: false }
-  }
-}
-
-/**
- * 用户注册
- */
-export async function register(data: RegisterRequest): Promise<RegisterResponse> {
-  try {
-    const response = await post('/api/v1/auth/register', data)
-    return response as unknown as RegisterResponse
-  } catch (error: any) {
-    return {
-      success: false,
-      message: error.message || t('error.auth.registerFailed')
-    }
   }
 }
 
@@ -449,45 +348,6 @@ export interface ChangePasswordRequest {
   new_password: string
 }
 
-/** Map change-password API failures to localized UI strings. */
-export function resolveChangePasswordError(error: any): string {
-  const details =
-    typeof error?.error?.details === 'string'
-      ? error.error.details
-      : typeof error?.details === 'string'
-        ? error.details
-        : ''
-  switch (details) {
-    case 'invalid_old_password':
-      return t('userProfile.changePassword.failed')
-    case 'password_policy':
-      return t('userProfile.changePassword.policyFailed')
-    case 'same_password':
-      return t('userProfile.changePassword.sameAsCurrent')
-    default:
-      return error?.message || t('userProfile.changePassword.failed')
-  }
-}
-
-/**
- * Self-service password rotation. On success the backend revokes every
- * outstanding session for the caller, so the client should clear local
- * auth state and send the user back to /login.
- */
-export async function changePassword(
-  data: ChangePasswordRequest,
-): Promise<{ success: boolean; message?: string }> {
-  try {
-    const response = await post('/api/v1/auth/change-password', data)
-    return response as unknown as { success: boolean; message?: string }
-  } catch (error: any) {
-    return {
-      success: false,
-      message: resolveChangePasswordError(error),
-    }
-  }
-}
-
 /**
  * 验证Token有效性
  */
@@ -504,62 +364,4 @@ export async function validateToken(): Promise<{ success: boolean; valid?: boole
   }
 }
 
-
-
-
-
 // ---- share-link registration --------------------------------------------
-
-// InviteLookup is the public projection of a share-link row used by
-// /register?token=xxx — enough to render the registration page header
-// ("X invited you to Y") without leaking sensitive inviter fields.
-export interface InviteLookup {
-  tenant_id: number
-  tenant_name?: string
-  role: string
-  expires_at: string
-}
-
-export interface InviteLookupResponse {
-  success: boolean
-  data?: InviteLookup
-  message?: string
-}
-
-export interface RegisterByInviteRequest {
-  token: string
-  email: string
-  username: string
-  password: string
-}
-
-/**
- * Resolve a share-link token (no auth) into the context the
- * registration page needs (tenant name, role, expiry). Returns 410
- * when the link is invalid / revoked / expired.
- *
- * Uses POST + body (rather than GET + path) so the plaintext token
- * never appears in access logs, browser history, or tracing spans.
- */
-export async function getInvitationByToken(token: string): Promise<InviteLookupResponse> {
-  try {
-    const response = await post(`/api/v1/auth/invitations/lookup`, { token })
-    return response as unknown as InviteLookupResponse
-  } catch (error: any) {
-    return { success: false, message: error.message || '' }
-  }
-}
-
-/**
- * Complete registration via a share-link token. The invitee supplies
- * their own email — the token is the authorisation, not an identity
- * lock.
- */
-export async function registerByInvite(data: RegisterByInviteRequest): Promise<LoginResponse> {
-  try {
-    const response = await post('/api/v1/auth/register-by-invite', data)
-    return response as unknown as LoginResponse
-  } catch (error: any) {
-    return { success: false, message: error.message || t('error.auth.registerFailed') }
-  }
-}

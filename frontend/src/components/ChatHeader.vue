@@ -202,7 +202,8 @@ const titleTextRef = ref<HTMLElement | null>(null)
 useSessionTitleMotion(titleTextRef, () => props.session?.id, () => displayTitle.value)
 const workspaceLabel = computed(() => {
   if (!props.session) return ''
-  if (!shouldRenderHostProjectSettings(deploymentCapabilities.isSupported('settings.sandbox.host'))) {
+  // 项目入口依赖原生目录选择器（settings.projectdir），不依赖 host 沙箱。
+  if (!shouldRenderHostProjectSettings(deploymentCapabilities.isSupported('settings.projectdir'))) {
     return ''
   }
   return hostWorkspaceHeaderText(props.session.host_workspace_dir, t('chatHeader.temporaryWorkspace'))

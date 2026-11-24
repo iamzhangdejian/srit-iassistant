@@ -1,0 +1,132 @@
+name: Desktop Windows
+
+# Windows 版桌面应用（.exe + NSIS 安装包）。
+#
+# 为什么不在 macOS 上交叉编译：本项目所有存储/解析依赖都是 cgo
+# （mattn-sqlite3、sqlite-vec、duckdb、anydoc），交叉编译需要一套完整的
+# MinGW-w64 工具链，而 anydoc 还要额外产出 x86_64-pc-windows-gnu 的静态库。
+# 直接用 Windows runner 只需要 runner 自带的那套 gcc，比在开发机上搭交叉
+# 工具链稳定得多。macOS 上仍可用
+#   TARGET=windows/amd64 bash scripts/oem-build-lite.sh
+# 交叉编译（脚本会检查 mingw 是否存在），只是本仓库不把那条路当主路径。
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "版本号（留空则读 VERSION 文件）"
+        required: false
+  push:
+    tags:
+      - "v*"
+
+concurrency:
+  group: desktop-windows-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+env:
+  GO_VERSION: "1.26"
+  NODE_VERSION: "22"
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
+
+jobs:
+  build:
+    runs-on: windows-latest
+    env:
+      CGO_ENABLED: 1
+      # windows-latest 自带 MinGW-w64（Git for Windows / msys2），两个名字都试。
+      MINGW_CC: gcc
+      MINGW_CXX: g++
+      GOLANG_PROTOBUF_REGISTRATION_CONFLICT: warn
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          cache: true
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      # duckdb 的 windows-amd64 预编译静态库是按 **UCRT + posix 线程模型** 编的：
+      #   - 缺 UCRT 会报 __stdio_common_vsnprintf_s / __imp___timezone 未定义
+      #   - 缺 winpthreads 会报 pthread_mutex_* 未定义
+      # runner 自带的 mingw 未必满足（Chocolatey 的 mingw 是 MSVCRT/win32），
+      # 所以显式装 MSYS2 的 UCRT64 工具链并把它放到 PATH 最前面。
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          update: false
+          install: mingw-w64-ucrt-x86_64-gcc
+
+      - name: Use UCRT64 toolchain
+        shell: bash
+        run: |
+          echo "C:\\msys64\\ucrt64\\bin" >> "$GITHUB_PATH"
+          export PATH="/c/msys64/ucrt64/bin:$PATH"
+          gcc -dumpmachine
+          gcc -v 2>&1 | grep -E "Thread model|gcc version" | head -2
+          # UCRT 工具链会定义 _UCRT；MSVCRT 不会。这里硬性把关，免得后面收一堆看不懂的链接错误。
+          if ! gcc -dM -E -x c /dev/null | grep -q "_UCRT"; then
+            echo "::error::当前 gcc 不是 UCRT 目标（详见脚本注释）；duckdb 预编译库要求 UCRT64"
+            exit 1
+          fi
+
+      - name: Install Wails CLI
+        shell: bash
+        run: go install github.com/wailsapp/wails/v2/cmd/wails@v2.12.0
+
+      - name: Install NSIS
+        shell: bash
+        run: choco install nsis -y --no-progress
+
+      - name: Install Rust + windows-gnu target
+        shell: bash
+        run: |
+          # anydoc 的静态库必须用 gnu triple 编，Go 侧是
+          #   #cgo windows,amd64 LDFLAGS: -L${SRCDIR}/lib/windows_amd64 -lanydoc_go
+          # 并且链接器和 CGO 用的是同一套 MinGW，避免 libstdc++ ABI 对不上。
+          rustup target add x86_64-pc-windows-gnu
+          rustc --version
+          gcc --version | head -1
+
+      - name: Build anydoc static lib
+        shell: bash
+        env:
+          CARGO_TARGET_X86_64_PC_WINDOWS_GNU_LINKER: gcc
+        run: TARGET=x86_64-pc-windows-gnu bash scripts/build-anydoc-lib.sh
+
+      - name: Build frontend
+        shell: bash
+        working-directory: frontend
+        run: |
+          npm ci
+          npm run build
+
+      - name: Build desktop app
+        shell: bash
+        run: bash scripts/oem-build-lite.sh
+        env:
+          TARGET: windows/amd64
+          APP_NAME: 国研智研体
+          UPDATE_REPO: ${{ vars.WEKNORA_UPDATE_REPO }}
+
+      - name: Collect artifacts
+        shell: bash
+        run: |
+          mkdir -p out
+          cp -v cmd/desktop/build/bin/*.exe out/ 2>/dev/null || true
+          cp -v cmd/desktop/build/bin/*Setup.exe out/ 2>/dev/null || true
+          ls -lh out
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: desktop-windows-amd64
+          path: out/
+          retention-days: 7

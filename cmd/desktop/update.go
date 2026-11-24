@@ -19,6 +19,25 @@ import (
 	"golang.org/x/mod/semver"
 )
 
+// updateRepo 是自动更新拉取的 GitHub 仓库，格式 "owner/repo"。
+//
+// OEM 发行版绝不能指向上游 Tencent/WeKnora：那样「检查更新」会把用户
+// 升级成未定制的上游版本，品牌、裁剪与授权全部丢失。因此这里默认空，
+// 由打包方通过 -ldflags "-X main.updateRepo=<owner/repo>" 或运行期环境
+// 变量 WK_UPDATE_REPO 指定。留空 = 不启用自动更新（明确提示，不静默）。
+var updateRepo string
+
+// updateRepoEnv 允许运维临时覆盖更新源（比如内网镜像），无需重新打包。
+const updateRepoEnv = "WK_UPDATE_REPO"
+
+// resolveUpdateRepo 返回生效的更新仓库，环境变量优先于编译期注入。
+func resolveUpdateRepo() string {
+	if v := strings.TrimSpace(os.Getenv(updateRepoEnv)); v != "" {
+		return v
+	}
+	return strings.TrimSpace(updateRepo)
+}
+
 type githubAsset struct {
 	Name               string `json:"name"`
 	BrowserDownloadURL string `json:"browser_download_url"`
@@ -49,15 +68,38 @@ func checkUpdate(ctx context.Context, currentVersion string, showUpToDate bool, 
 			currentVersion = "v" + currentVersion
 		}
 
+		// 自有通道优先：交付形态默认走管理端 /api/updates/latest，
+		// 只有没配 base URL 时才回落到 GitHub（开发自测用）。
+		if base := resolveUpdateBaseURL(); base != "" {
+			checkChannelUpdate(ctx, base, strings.TrimPrefix(currentVersion, "v"), showUpToDate, autoDownload)
+			return
+		}
+
+		repo := resolveUpdateRepo()
+		if repo == "" {
+			logger.Infof(context.Background(),
+				"Auto update skipped: %s / -ldflags main.updateBaseURL 与 main.updateRepo 都没设置", updateBaseURLEnv)
+			if showUpToDate {
+				wailsruntime.MessageDialog(ctx, wailsruntime.MessageDialogOptions{
+					Type:          wailsruntime.InfoDialog,
+					Title:         "Check for Updates",
+					Message:       "这个安装包没有配置更新服务（WK_UPDATE_BASE_URL 未设置），请联系管理员获取新版本。",
+					Buttons:       []string{"OK"},
+					DefaultButton: "OK",
+				})
+			}
+			return
+		}
+
 		client := &http.Client{Timeout: 10 * time.Second}
-		req, err := http.NewRequest("GET", "https://api.github.com/repos/Tencent/WeKnora/releases/latest", nil)
+		req, err := http.NewRequest("GET", fmt.Sprintf("https://api.github.com/repos/%s/releases/latest", repo), nil)
 		if err != nil {
 			logger.Warnf(context.Background(), "Check update failed: %v", err)
 			return
 		}
 
 		// Add User-Agent header which is required/recommended by GitHub API
-		req.Header.Set("User-Agent", "WeKnora-Lite-Desktop-App")
+		req.Header.Set("User-Agent", "GuoYan-Desktop-App")
 
 		// Add Authorization header if GITHUB_TOKEN is present to increase rate limit
 		if token := os.Getenv("GITHUB_TOKEN"); token != "" {
@@ -119,7 +161,7 @@ func checkUpdate(ctx context.Context, currentVersion string, showUpToDate bool, 
 					return
 				}
 
-				msg := fmt.Sprintf("A new version of WeKnora Lite is available!\n\nCurrent version: %s\nLatest version: %s\n\nWould you like to download it now?", currentVersion, latestVersion)
+				msg := fmt.Sprintf("A new version of 国研智研体 is available!\n\nCurrent version: %s\nLatest version: %s\n\nWould you like to download it now?", currentVersion, latestVersion)
 				choice, _ := wailsruntime.MessageDialog(ctx, wailsruntime.MessageDialogOptions{
 					Type:          wailsruntime.InfoDialog,
 					Title:         "Update Available",
@@ -143,7 +185,7 @@ func checkUpdate(ctx context.Context, currentVersion string, showUpToDate bool, 
 			wailsruntime.MessageDialog(ctx, wailsruntime.MessageDialogOptions{
 				Type:          wailsruntime.InfoDialog,
 				Title:         "Up to Date",
-				Message:       fmt.Sprintf("You are using the latest version of WeKnora Lite.\n\nCurrent version: %s", currentVersion),
+				Message:       fmt.Sprintf("You are using the latest version of 国研智研体.\n\nCurrent version: %s", currentVersion),
 				Buttons:       []string{"OK"},
 				DefaultButton: "OK",
 			})
@@ -280,7 +322,7 @@ func downloadAndInstall(ctx context.Context, url string, filename string, curren
 		choice, _ := wailsruntime.MessageDialog(ctx, wailsruntime.MessageDialogOptions{
 			Type:          wailsruntime.InfoDialog,
 			Title:         "Update Ready",
-			Message:       fmt.Sprintf("WeKnora Lite %s has been downloaded successfully.\n\nWould you like to restart and install the new version now?", latestVersion),
+			Message:       fmt.Sprintf("国研智研体 %s has been downloaded successfully.\n\nWould you like to restart and install the new version now?", latestVersion),
 			Buttons:       []string{"Restart Now", "Later"},
 			DefaultButton: "Restart Now",
 		})
@@ -351,7 +393,7 @@ del "%%~f0"
 					return
 				}
 
-				mountPoint := filepath.Join(os.TempDir(), "WeKnoraUpdateMount")
+				mountPoint := filepath.Join(os.TempDir(), "GuoYanUpdateMount")
 				os.MkdirAll(mountPoint, 0755)
 
 				cmdMount := exec.Command("hdiutil", "attach", savePath, "-mountpoint", mountPoint, "-nobrowse", "-quiet")

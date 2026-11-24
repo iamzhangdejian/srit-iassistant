@@ -1,11 +1,13 @@
 <script setup lang="ts">
-import { ref, onMounted, onBeforeUnmount, onUnmounted, computed, watch, nextTick, h, type PropType } from "vue";
+import { ref, reactive, onMounted, onBeforeUnmount, onUnmounted, computed, watch, nextTick, h, type PropType } from "vue";
 import { storeToRefs } from 'pinia';
 import { useRoute, useRouter } from 'vue-router';
 import { onBeforeRouteUpdate } from 'vue-router';
 import { MessagePlugin } from "tdesign-vue-next";
 import type { SendMessageOptions } from '@/utils/questionOrigin';
 import { useSettingsStore } from '@/stores/settings';
+// OEM: 对话面板手动插件勾选区
+import OemPluginPicker from '@/components/chat/OemPluginPicker.vue';
 import { useBrowserConnectionStore } from '@/stores/browserConnection';
 import { useUIStore } from '@/stores/ui';
 import BrowserIcon from '@/components/icons/BrowserIcon.vue';
@@ -20,8 +22,12 @@ import { useOrganizationStore } from '@/stores/organization';
 import KnowledgeBaseSelector from './KnowledgeBaseSelector.vue';
 import MentionSelector from './MentionSelector.vue';
 import { useAuthStore } from '@/stores/auth';
+import {
+  getTenantRetrievalConfig,
+  updateTenantRetrievalConfig,
+  type RetrievalConfig,
+} from '@/api/retrieval';
 import type { BrowserKnowledgeBase } from '@/utils/mentionFileBrowser';
-import AgentSelector from './AgentSelector.vue';
 import HostApprovalModeSelect from './HostApprovalModeSelect.vue';
 import { getCaretCoordinates } from '@/utils/caret';
 import { getRootZoom, rectToCssPx, cssViewportSize } from '@/utils/zoom';
@@ -59,8 +65,7 @@ import {
 import { formatLocalizedList } from '@/utils/format-list';
 import { SKILL_ICON, type MentionItem, type MentionItemType, type MentionRequestItem } from '@/types/mention';
 import { toolboxLocation } from '@/config/toolbox';
-import { supportedLevels, levelLabelKey, levelFromLegacy, clampLevel, type ReasoningLevel } from '@/utils/reasoningEffort';
-import { customAgentStreamMode } from '@/utils/agent-mode';
+import { supportedLevels, levelLabelKey, levelDescriptionKey, levelFromLegacy, clampLevel, type ReasoningLevel } from '@/utils/reasoningEffort';
 import { isVoiceInputSupported, useVoiceInput, type VoiceInputError } from '@/composables/useVoiceInput';
 import { createHoldToTalk, voiceHotkeyLabel } from '@/utils/voiceHotkey';
 
@@ -168,9 +173,6 @@ const triggerImageUpload = () => {
   imageInputRef.value?.click();
 };
 const atButtonRef = ref<HTMLElement>();
-const showAgentModeSelector = ref(false);
-const agentModeButtonRef = ref<HTMLElement>();
-const agentModeDropdownStyle = ref<Record<string, string>>({});
 
 const selectedAgentId = computed({
   get: () => settingsStore.selectedAgentId || BUILTIN_QUICK_ANSWER_ID,
@@ -203,12 +205,6 @@ const selectedSharedAgent = computed(() => {
   return orgStore.sharedAgents?.find(
     s => s.agent.id === selectedAgentId.value && String(s.source_tenant_id) === sourceTenantId
   );
-});
-
-// 判断是否为自定义智能体（非内置）
-const isCustomAgent = computed(() => {
-  const agent = selectedAgent.value;
-  return agent && !agent.is_builtin;
 });
 
 // 判断是否有智能体配置（包括内置智能体）
@@ -979,7 +975,8 @@ const loadMCPServices = async () => {
     if (mcpServicesRequestKey !== requestKey) return;
     mcpServices.value = list;
   } catch (error) {
-    console.error('Failed to load MCP services:', error);
+    // OEM: MCP 已在后端裁剪（FeatCutMCP），接口返回 404 属预期，降级为静默。
+    if (import.meta.env.DEV) console.warn('[oem] MCP services unavailable (cut)', error);
     if (mcpServicesRequestKey !== requestKey) return;
     mcpServices.value = [];
   }
@@ -1020,7 +1017,6 @@ const openBrowserConnectionSettings = () => {
 const toggleBrowserSource = () => {
   showMention.value = false;
   showModelSelector.value = false;
-  showAgentModeSelector.value = false;
   if (browserConnection.knownOffline) {
     openBrowserConnectionSettings();
     return;
@@ -1036,7 +1032,8 @@ const loadWebSearchConfig = async (force = false) => {
       settingsStore.toggleWebSearch(false);
     }
   } catch (error) {
-    console.error('Failed to load web search config:', error);
+    // OEM: 网页搜索已在后端裁剪（FeatCutWebSearch），404 属预期，降级为静默。
+    if (import.meta.env.DEV) console.warn('[oem] web search unavailable (cut)', error);
     chatResources.invalidate('webSearchProviders');
     if (!settingsStore.selectedAgentSourceTenantId && settingsStore.isWebSearchEnabled) {
       settingsStore.toggleWebSearch(false);
@@ -1044,73 +1041,18 @@ const loadWebSearchConfig = async (force = false) => {
   }
 };
 
-// 选中的自定义智能体可能刚在编辑页改过运行模式。对话页回到前台时列表会刷新，
-// 但 isAgentEnabled 只在“选择智能体”那一刻同步过，仍是旧值，请求因而走错管线
-// （#4803）。列表刷新后按智能体当前配置纠正一次。
-const syncSelectedAgentModeFromConfig = () => {
-  if (props.embeddedMode) return;
-  const agent = selectedAgent.value;
-  // 列表尚未加载时 selectedAgent 会回退到快速问答占位对象，不能用它推断模式。
-  if (!agent || agent.id !== selectedAgentId.value) return;
-  const shouldEnable = customAgentStreamMode(selectedAgentId.value, agent.config);
-  if (shouldEnable === null || shouldEnable === settingsStore.isAgentEnabled) return;
-  settingsStore.toggleAgent(shouldEnable);
-};
-
-// 加载智能体列表（我的 + 共享，供选中态与就绪检查用）
+// 加载智能体列表（供知识库锁定、技能区等就绪判断用）。
+//
+// 桌面版只有一个固定助手，没有「选择智能体」这一步，因此这里不再纠正运行
+// 模式、也不再兜底切换被停用的智能体——那两段逻辑都是在维护下拉的选中态。
 const loadAgents = async (force = false) => {
   try {
     await chatResources.ensureAgents(force);
-    ensureSelectedAgentNotDisabled();
-    syncSelectedAgentModeFromConfig();
   } catch (error) {
-    console.error('Failed to load agents:', error);
+    // OEM: 智能体已在后端裁剪（FeatCutAgents），404 属预期，降级为静默。
+    if (import.meta.env.DEV) console.warn('[oem] agents unavailable (cut)', error);
   }
 };
-
-// 会话恢复会按 last_request_state 覆盖 isAgentEnabled，可能把它改回编辑前的旧值；
-// 选中智能体变化时也要重新对齐。挂载后的首次同步由 loadAgents 完成，这里兜住
-// 之后任何一次漂移。
-watch(
-  () => [selectedAgentId.value, currentAgentConfig.value?.agent_mode, settingsStore.isAgentEnabled] as const,
-  () => syncSelectedAgentModeFromConfig(),
-);
-
-// 默认选中的 builtin（builtin-quick-answer）也可能被当前空间管理员停用。
-// 列表加载完后做一次纠偏：若当前选中的是本空间停用的 agent（仅限「我的/builtin」，
-// 共享智能体由源空间决定，本地停用列表不适用），按 智能推理 → 快速问答 →
-// 第一个可用 的顺序兜底切换。全部都被停用时保持原选择不动（极端场景，UI 仍会
-// 在 enabledAgents 过滤后显示空，由用户在智能体页恢复任意一个）。
-const ensureSelectedAgentNotDisabled = () => {
-  if (settingsStore.selectedAgentSourceTenantId) return
-  const currentId = settingsStore.selectedAgentId || BUILTIN_QUICK_ANSWER_ID
-  if (!disabledOwnAgentIds.value.includes(currentId)) return
-
-  const isEnabled = (id: string) =>
-    agents.value.some(a => a.id === id) && !disabledOwnAgentIds.value.includes(id)
-
-  let fallback: CustomAgent | undefined
-  if (isEnabled(BUILTIN_SMART_REASONING_ID)) {
-    fallback = agents.value.find(a => a.id === BUILTIN_SMART_REASONING_ID)
-  } else if (isEnabled(BUILTIN_QUICK_ANSWER_ID)) {
-    fallback = agents.value.find(a => a.id === BUILTIN_QUICK_ANSWER_ID)
-  } else {
-    fallback = agents.value.find(a => !disabledOwnAgentIds.value.includes(a.id))
-  }
-  if (!fallback) return
-
-  settingsStore.selectAgent(fallback.id)
-  // selectAgent 内部仅对两个 builtin 常量自动切 isAgentEnabled；自定义 agent 兜底时
-  // 需要按其 agent_mode 显式同步一次，保证模式徽标与对话行为一致。
-  if (fallback.id !== BUILTIN_QUICK_ANSWER_ID && fallback.id !== BUILTIN_SMART_REASONING_ID) {
-    settingsStore.toggleAgent(fallback.config?.agent_mode === 'smart-reasoning')
-  }
-}
-
-// 对话下拉中展示的「我的」智能体（排除当前空间已停用的）
-const enabledAgents = computed(() =>
-  agents.value.filter(a => !disabledOwnAgentIds.value.includes(a.id))
-);
 
 // The "last selected chat model" lives in localStorage so it survives
 // reloads without a KV round-trip. localStorage is per-browser, not
@@ -1287,11 +1229,125 @@ const agentReasoningLevel = computed(() => clampLevel(
 // Show the effective level while leaving the request unset until the user
 // chooses a different level. Selecting the agent's level restores inheritance.
 const displayedReasoningLevel = computed(() => settingsStore.reasoningEffortOverride || agentReasoningLevel.value);
-const showReasoningSelector = ref(false);
+// 合并浮层的当前二级面板：模型 / 思考强度 / 召回参数。
+const dropdownPane = ref<'model' | 'reasoning' | 'recall'>('model');
+
+// 选中档位的短名，用于触发器上的强度徽标；'关闭' 时返回空串（不显示徽标）。
+const reasoningBadgeText = computed(() => {
+  const level = displayedReasoningLevel.value;
+  if (!level || level === 'off') return '';
+  // 直接复用 i18n 的短名（「自动」「高」「最大」），保持与二级菜单一致。
+  return t(levelLabelKey(level));
+});
+
 const selectReasoningLevel = (level: ReasoningLevel) => {
   settingsStore.reasoningEffortOverride = level === agentReasoningLevel.value ? '' : level;
-  showReasoningSelector.value = false;
+  // 选完档位关闭整个浮层，与模型选择的行为一致（一次点击完成一次设置）。
+  showModelSelector.value = false;
 };
+
+// ===== 召回参数（空间级检索配置）=====
+// 原先是独立按钮 + 独立浮层的 OemRecallPicker 组件，现并入本浮层第三个 Tab。
+// 数据语义不变：读写 /api/v1/tenants/kv/retrieval-config，
+// 与「设置 → 检索配置」是同一份空间级配置，这里改等于那里改。
+const DEFAULT_RECALL: RetrievalConfig = {
+  embedding_top_k: 50,
+  vector_threshold: 0.15,
+  keyword_threshold: 0.3,
+  rerank_top_k: 10,
+  rerank_threshold: 0.2,
+  rerank_model_id: '',
+  rrf_k: 60,
+  rrf_vector_weight: 0.7,
+  rrf_keyword_weight: 0.3,
+};
+const recallForm = reactive<RetrievalConfig>({ ...DEFAULT_RECALL });
+const recallSaveState = ref<'idle' | 'saving' | 'saved' | 'error'>('idle');
+/** 只有管理员可以改空间级召回参数（后端 RBAC 同样会校验） */
+const canEditRecall = computed(() => mentionAuth.hasRole('admin'));
+let recallLoaded = false;
+let recallSaveTimer: number | null = null;
+
+async function loadRecallConfig() {
+  try {
+    const res: any = await getTenantRetrievalConfig();
+    const cfg = res?.data;
+    if (cfg) {
+      // 空间级 KV 未初始化时后端返回全 0 而不是 null，
+      // 所以 top_k 这类字段用「非正值回退默认」，阈值类单独判断（0 是合法值，表示不过滤）。
+      const pickPositive = (val: any, fallback: number) =>
+        typeof val === 'number' && val > 0 ? val : fallback;
+      const pickRatio = (val: any, fallback: number) =>
+        typeof val === 'number' && val >= 0 ? val : fallback;
+      Object.assign(recallForm, {
+        embedding_top_k: pickPositive(cfg.embedding_top_k, DEFAULT_RECALL.embedding_top_k),
+        rerank_top_k: pickPositive(cfg.rerank_top_k, DEFAULT_RECALL.rerank_top_k),
+        vector_threshold: pickRatio(cfg.vector_threshold, DEFAULT_RECALL.vector_threshold),
+        keyword_threshold: pickRatio(cfg.keyword_threshold, DEFAULT_RECALL.keyword_threshold),
+        rerank_threshold: pickRatio(cfg.rerank_threshold, DEFAULT_RECALL.rerank_threshold),
+        rerank_model_id: cfg.rerank_model_id ?? '',
+        rrf_k: pickPositive(cfg.rrf_k, DEFAULT_RECALL.rrf_k ?? 60),
+        rrf_vector_weight: pickRatio(cfg.rrf_vector_weight, DEFAULT_RECALL.rrf_vector_weight ?? 0.7),
+        rrf_keyword_weight: pickRatio(cfg.rrf_keyword_weight, DEFAULT_RECALL.rrf_keyword_weight ?? 0.3),
+      });
+    }
+  } catch {
+    // 读不到就用默认值展示，不影响对话主流程
+    recallSaveState.value = 'idle';
+  } finally {
+    recallLoaded = true;
+  }
+}
+
+async function saveRecallConfig() {
+  if (!canEditRecall.value) return;
+  recallSaveState.value = 'saving';
+  try {
+    await updateTenantRetrievalConfig({
+      ...recallForm,
+      rerank_threshold: recallForm.rerank_threshold ?? 0.2,
+    });
+    recallSaveState.value = 'saved';
+  } catch {
+    recallSaveState.value = 'error';
+  }
+}
+
+function resetRecall() {
+  Object.assign(recallForm, DEFAULT_RECALL);
+}
+
+// 打开「召回参数」Tab 时按需加载，避免每次进对话页都多打一个接口
+watch(dropdownPane, (pane) => {
+  if (pane === 'recall' && !recallLoaded) void loadRecallConfig();
+});
+
+// 编辑后 600ms 防抖保存
+watch(
+  () => [
+    recallForm.embedding_top_k,
+    recallForm.rerank_top_k,
+    recallForm.vector_threshold,
+    recallForm.keyword_threshold,
+  ],
+  () => {
+    if (!recallLoaded || !canEditRecall.value) return;
+    if (recallSaveTimer !== null) window.clearTimeout(recallSaveTimer);
+    recallSaveTimer = window.setTimeout(() => {
+      void saveRecallConfig();
+    }, 600);
+  },
+);
+
+// 切空间时重新读取该空间的召回参数
+watch(
+  () => mentionAuth.effectiveTenantId,
+  () => {
+    recallLoaded = false;
+    if (dropdownPane.value === 'recall') void loadRecallConfig();
+  },
+);
+
 watch([selectedModel, reasoningLevels, () => settingsStore.reasoningEffortOverride, () => settingsStore._isApplyingSessionState], () => {
   // Wait for model resources during session restoration. Once known, an
   // unsupported override returns to inheritance instead of inventing a level.
@@ -1313,8 +1369,10 @@ const selectedModelDisplayName = computed(() => {
 
 const modelTriggerTooltip = computed(() => {
   if (isModelLockedByAgent.value) return t('input.modelLockedByAgent');
-  if (followsDefaultModel.value) return t('input.modelAutoHint');
-  return '';
+  const effort = reasoningBadgeText.value;
+  const modelText = followsDefaultModel.value ? t('input.modelAutoHint') : selectedModelDisplayName.value;
+  // 合并后一个按钮承载两条信息，tooltip 同时说明模型与当前强度。
+  return effort ? `${modelText} · ${t('modelSettings.debug.reasoningEffort')}: ${effort}` : modelText;
 });
 
 const modelDisplayName = (model: ModelConfig) => {
@@ -1368,7 +1426,9 @@ const updateModelDropdownPosition = () => {
     height: rect.height
   });
 
-  const dropdownWidth = 320;
+  // 400px：合并后浮层要容纳模型名、上下文窗口与三个 Tab，
+  // 320px 时较长的模型名会被迫截断（如 Qwen3.6-35B-A3B-4bit）。
+  const dropdownWidth = 400;
   const offsetY = 8;
   const { width: vw, height: vh } = cssViewportSize(zoom);
 
@@ -1960,7 +2020,6 @@ const triggerMention = () => {
   if (!textarea) return;
 
   // 关闭其他选择器
-  showAgentModeSelector.value = false;
   showModelSelector.value = false;
 
   textarea.focus();
@@ -2067,7 +2126,6 @@ const removeFile = (id: string) => {
 };
 
 const toggleModelSelector = () => {
-  showReasoningSelector.value = false;
   // 如果智能体锁定了模型，不允许打开选择器
   if (isModelLockedByAgent.value) {
     MessagePlugin.warning(t('input.modelLockedByAgent'));
@@ -2076,10 +2134,11 @@ const toggleModelSelector = () => {
 
   // 互斥：关闭其他
   showMention.value = false;
-  showAgentModeSelector.value = false;
 
   showModelSelector.value = !showModelSelector.value;
   if (showModelSelector.value) {
+    // 每次打开都回到「模型」面板：换模型是高频诉求，调强度是低频。
+    dropdownPane.value = 'model';
     if (!availableModels.value.length) {
       loadChatModels();
     }
@@ -2102,18 +2161,7 @@ const closeModelSelector = () => {
   showModelSelector.value = false;
 };
 
-const handleReasoningVisibleChange = (visible: boolean) => {
-  if (!visible) return;
-  closeModelSelector();
-  showMention.value = false;
-  showAgentModeSelector.value = false;
-};
-
 // 关闭 Agent 模式选择器（点击外部）
-const closeAgentModeSelector = () => {
-  showAgentModeSelector.value = false;
-};
-
 const closeMentionSelector = (e: MouseEvent) => {
   const target = e.target as HTMLElement;
   // 如果点击的是输入框区域，不关闭 Mention 列表（由光标逻辑控制）
@@ -2141,7 +2189,10 @@ onMounted(() => {
   window.addEventListener('blur', onVoiceWindowBlur);
   document.addEventListener('visibilitychange', onVoiceVisibilityChange);
 
-  browserConnection.watchStatus();
+  // 浏览器插件配对：OEM 交付里 FeatCutBrowserSkill 会连带砍掉 /api/v1/me/browser，
+  // 所以先问能力清单；不支持时不要起轮询，否则每 30s 一条 404 警告。
+  const browserSkillSupported = deploymentCapabilities.isSupported('integrations.browserskill');
+  if (browserSkillSupported) browserConnection.watchStatus();
 
   // 并行拉取；若 platform 已预取且缓存未过期则直接复用
   initChatModelSelection();
@@ -2181,7 +2232,6 @@ onMounted(() => {
   }
 
   // 监听点击外部关闭下拉菜单
-  document.addEventListener('click', closeAgentModeSelector);
   document.addEventListener('click', closeModelSelector);
   document.addEventListener('click', closeMentionSelector);
 
@@ -2190,16 +2240,10 @@ onMounted(() => {
     if (showModelSelector.value) {
       updateModelDropdownPosition();
     }
-    if (showAgentModeSelector.value) {
-      updateAgentModeDropdownPosition();
-    }
   };
   scrollHandler = () => {
     if (showModelSelector.value) {
       updateModelDropdownPosition();
-    }
-    if (showAgentModeSelector.value) {
-      updateAgentModeDropdownPosition();
     }
   };
 
@@ -2211,6 +2255,8 @@ onBeforeUnmount(() => {
   // Let TDesign handle blur while its textarea is still attached to the DOM.
   const textarea = getTextareaEl();
   if (textarea?.isConnected && document.activeElement === textarea) textarea.blur();
+  // 召回参数的防抖保存定时器：组件卸载时清掉，避免页面销毁后仍触发请求。
+  if (recallSaveTimer !== null) window.clearTimeout(recallSaveTimer);
 });
 
 onUnmounted(() => {
@@ -2218,9 +2264,10 @@ onUnmounted(() => {
   window.removeEventListener('keyup', onVoiceKeyup, true);
   window.removeEventListener('blur', onVoiceWindowBlur);
   document.removeEventListener('visibilitychange', onVoiceVisibilityChange);
-  if (!props.embeddedMode) browserConnection.unwatchStatus();
+  if (!props.embeddedMode && deploymentCapabilities.isSupported('integrations.browserskill')) {
+    browserConnection.unwatchStatus();
+  }
   window.removeEventListener(CHAT_FILE_DROP_EVENT, handleChatFileDrop as EventListener);
-  document.removeEventListener('click', closeAgentModeSelector);
   document.removeEventListener('click', closeModelSelector);
   document.removeEventListener('click', closeMentionSelector);
   if (mentionSearchTimer) clearTimeout(mentionSearchTimer);
@@ -2414,235 +2461,40 @@ const createSession = async (
   void focusInput();
 }
 
-const updateAgentModeDropdownPosition = () => {
-  const anchor = agentModeButtonRef.value;
+// 队列里排在最前面的补充消息。空草稿按补发快捷键时把它提到最前执行，
+// 模板里用它判断哪一条的提示语要带上快捷键说明。
+const firstQueuedSteer = computed(() =>
+  props.queuedSteers.find(item => !item.pending && !item.promoting) || null,
+);
 
-  if (!anchor) {
-    agentModeDropdownStyle.value = {
-      position: 'fixed',
-      top: '50%',
-      left: '50%',
-      transform: 'translate(-50%, -50%)'
-    };
-    return;
-  }
+// 补发快捷键的展示文案（Mac 用 ⌘，其他平台用 Ctrl），与 chatSubmitShortcut
+// 里 metaKey 触发 inject 的分支保持一致。
+const steerShortcutLabel = computed(() =>
+  navigator.platform.toLowerCase().includes('mac') ? '⌘+Enter' : 'Ctrl+Enter',
+);
 
-  // Normalize coordinates to CSS pixels (root <html> may carry `zoom`).
-  const zoom = getRootZoom();
-  const rect = rectToCssPx(anchor.getBoundingClientRect(), zoom);
-  const dropdownWidth = 200;
-  const offsetY = 8;
-  const { width: vw, height: vh } = cssViewportSize(zoom);
-
-  // 水平位置：左对齐
-  let left = Math.floor(rect.left);
-  const minLeft = 16;
-  const maxLeft = Math.max(16, vw - dropdownWidth - 16);
-  left = Math.max(minLeft, Math.min(maxLeft, left));
-
-  // 垂直位置：紧贴按钮，使用合理的高度避免空白
-  const preferredDropdownHeight = 140; // Agent 模式选择器内容较少，用更小的优选高度
-  const maxDropdownHeight = 150;
-  const minDropdownHeight = 100;
-  const topMargin = 20;
-  const spaceBelow = vh - rect.bottom;
-  const spaceAbove = rect.top;
-
-  console.log('[Agent Dropdown] Space check:', {
-    spaceBelow,
-    spaceAbove,
-    windowHeight: vh
-  });
-
-  let actualHeight: number;
-
-  // 优先考虑下方空间
-  if (spaceBelow >= minDropdownHeight + offsetY) {
-    // 下方有足够空间，向下弹出
-    actualHeight = Math.min(preferredDropdownHeight, spaceBelow - offsetY - 16);
-    const top = Math.floor(rect.bottom + offsetY);
-
-    agentModeDropdownStyle.value = {
-      position: 'fixed !important',
-      width: `${dropdownWidth}px`,
-      left: `${left}px`,
-      top: `${top}px`,
-      maxHeight: `${actualHeight}px`,
-      transform: 'none !important',
-      margin: '0 !important',
-      padding: '0 !important',
-    };
-    console.log('[Agent Dropdown] Position: below button', { actualHeight });
-  } else {
-    // 向上弹出，使用 bottom 定位确保紧贴按钮
-    const availableHeight = spaceAbove - offsetY - topMargin;
-    if (availableHeight >= preferredDropdownHeight) {
-      actualHeight = preferredDropdownHeight;
-    } else {
-      actualHeight = Math.max(minDropdownHeight, availableHeight);
-    }
-
-    const bottom = vh - rect.top + offsetY;
-
-    agentModeDropdownStyle.value = {
-      position: 'fixed !important',
-      width: `${dropdownWidth}px`,
-      left: `${left}px`,
-      bottom: `${bottom}px`, // 使用 bottom 定位，确保紧贴按钮
-      maxHeight: `${actualHeight}px`,
-      transform: 'none !important',
-      margin: '0 !important',
-      padding: '0 !important',
-    };
-    console.log('[Agent Dropdown] Position: above button', { actualHeight, bottom });
-  }
-};
-
-const toggleAgentModeSelector = () => {
-  // 互斥
-  showMention.value = false;
-  showModelSelector.value = false;
-
-  showAgentModeSelector.value = !showAgentModeSelector.value;
-  if (showAgentModeSelector.value) {
-    if (!chatResources.isLoaded('agents')) {
-      void loadAgents(true);
-    }
-    // 多次更新位置确保准确
-    nextTick(() => {
-      updateAgentModeDropdownPosition();
-      requestAnimationFrame(() => {
-        updateAgentModeDropdownPosition();
-        setTimeout(() => {
-          updateAgentModeDropdownPosition();
-        }, 50);
-      });
-    });
-  }
-}
-
-const selectAgentMode = async (mode: 'quick-answer' | 'smart-reasoning') => {
-  if (!chatResources.isLoaded('models')) {
-    await loadChatModels()
-  }
-
-  const builtinAgentId = mode === 'smart-reasoning' ? BUILTIN_SMART_REASONING_ID : BUILTIN_QUICK_ANSWER_ID;
-  const builtinAgent = agents.value.find(a => a.id === builtinAgentId);
-
-  if (builtinAgent) {
-    const { keys: notReadyKeys, labels: notReadyReasons } = collectAgentNotReadyReasons(
-      builtinAgent,
-      mode === 'smart-reasoning',
-    );
-    if (notReadyReasons.length > 0) {
-      showAgentModeSelector.value = false;
-      showAgentNotReadyMessage(builtinAgent, notReadyReasons, notReadyKeys);
-      return;
-    }
-  }
-
-  const shouldEnableAgent = mode === 'smart-reasoning';
-  if (shouldEnableAgent !== isAgentEnabled.value) {
-    settingsStore.toggleAgent(shouldEnableAgent);
-    // 同时更新选中的智能体
-    settingsStore.selectAgent(shouldEnableAgent ? BUILTIN_SMART_REASONING_ID : BUILTIN_QUICK_ANSWER_ID);
-    MessagePlugin.success(shouldEnableAgent ? t('input.messages.agentSwitchedOn') : t('input.messages.agentSwitchedOff'));
-  }
-  showAgentModeSelector.value = false;
-}
-
-// 选择智能体（新版）；sourceTenantId 为共享智能体时传入
-const handleAgentNotReady = (
-  agent: CustomAgent,
-  labels: string[],
-  keys: AgentNotReadyReasonKey[],
-  sourceTenantId?: string,
-) => {
-  showAgentNotReadyMessage(agent, labels, keys, sourceTenantId);
-};
-
-const handleSelectAgent = async (agent: CustomAgent, sourceTenantId?: string) => {
-  if (!chatResources.isLoaded('models')) {
-    await loadChatModels()
-  }
-
-  // 根据智能体的 agent_mode 判断是否为 Agent 模式
-  const isAgentType = agent.config?.agent_mode === 'smart-reasoning';
-
-  // 统一检查智能体是否就绪（内置和自定义智能体使用相同逻辑）
-  const actualAgent = agent.is_builtin && !sourceTenantId
-    ? (agents.value.find(a => a.id === agent.id) || agent)
-    : agent;
-
-  const { keys: notReadyKeys, labels: notReadyReasons } = collectAgentNotReadyReasons(
-    actualAgent,
-    isAgentType,
-    sourceTenantId,
-  );
-
-  if (notReadyReasons.length > 0) {
-    showAgentModeSelector.value = false;
-    showAgentNotReadyMessage(actualAgent, notReadyReasons, notReadyKeys, sourceTenantId);
-    return;
-  }
-
-  settingsStore.selectAgent(agent.id, sourceTenantId);
-  settingsStore.toggleAgent(!!isAgentType);
-
-  // 同步模型（选中的对话模型随智能体切换，含共享智能体）。
-  // 网络搜索已由 selectAgent 重置为关闭，智能体配置只控制该开关是否可用。
-  const agentModel = agent.config?.model_id;
-  if (agentModel && agentModel.trim() !== '') {
-    selectedModelId.value = agentModel;
-  } else {
-    const lastPick = readLastChatModelID();
-    if (lastPick) {
-      selectedModelId.value = lastPick;
-    }
-  }
-
-  showAgentModeSelector.value = false;
-
-  // Only the two "mode-entry" built-ins are re-branded as "Normal / Agent Mode"
-  // in the dropdown — the switched-on/off toasts only make sense for them.
-  // Other built-ins (wiki researcher, data analyst, etc.) share `is_builtin`
-  // but should fall back to the generic agentSelected toast like custom agents,
-  // otherwise selecting e.g. the Wiki Questioner incorrectly says
-  // "Switched to Intelligent Reasoning".
-  const isModeBuiltin =
-    agent.id === BUILTIN_QUICK_ANSWER_ID || agent.id === BUILTIN_SMART_REASONING_ID;
-  const message = isModeBuiltin
-    ? (isAgentType ? t('input.messages.agentSwitchedOn') : t('input.messages.agentSwitchedOff'))
-    : t('input.messages.agentSelected', { name: agent.name });
-  MessagePlugin.success(message);
-}
-
+// 输入框清空（含草稿与富文本状态），发送/补发成功后调用。
 const clearvalue = () => {
-  // Guard: only clear when the textarea DOM element is still mounted,
-  // otherwise TDesign's autosize will call getComputedStyle on a non-Element.
-  if (!getTextareaEl()) return;
-  query.value = "";
-}
+  query.value = '';
+  showMention.value = false;
+};
 
-// Drop any pending images/attachments and stop their status polling. Used when
-// switching sessions: leftover documentIds belong to the previous session, so
-// keeping them would make polling 404 (falsely marking them failed) or send IDs
-// the new session does not own ("attachment ... not found in this session").
+// 清掉尚未提交的附件与图片预览，避免路由切换后残留到下一个会话。
 const clearPendingUploads = () => {
   uploadedImages.value.forEach(img => URL.revokeObjectURL(img.preview));
   uploadedImages.value = [];
   attachmentUploadRef.value?.clear();
   uploadedAttachments.value = [];
-}
+};
 
-const steerShortcutLabel = /Mac|iPhone|iPad/.test(navigator.platform) ? '⌘ Enter' : 'Alt+Enter';
-const firstQueuedSteer = computed(() => props.queuedSteers.find(item =>
-  item.delivery === 'after' && !item.pending && !item.promoting && !item.failed));
+// 运行中把当前草稿作为「补充」注入正在生成的回答，而不是新开一轮。
+//
+// 这里只做「有内容才注入」的守卫，真正的中途发送交给 createSession：它已经
+// 处理了附件拦截、mention 组装、embedded 作用域这些分支，再复制一份容易与
+// 那条路径漂移。
 const injectCurrentInput = () => {
-  if (props.composerLocked) return;
-  if (!props.isReplying || !props.canSteer) return;
-  if (query.value.trim()) void createSession(query.value, 'inject');
-  else if (firstQueuedSteer.value) emit('promote-steer', firstQueuedSteer.value.steer_id);
+  if (!query.value.trim()) return;
+  void createSession(query.value, 'inject');
 };
 
 const onKeydown = (val: string, event: { e: KeyboardEvent }) => {
@@ -2676,26 +2528,23 @@ const onKeydown = (val: string, event: { e: KeyboardEvent }) => {
     }
   }
 
-  // 退格键：当输入框为空且有选中项时，删除最后一个选中项
-  if (event.e.keyCode === 8) { // Backspace
-    const textarea = getTextareaEl();
-    if (textarea && textarea.selectionStart === 0 && textarea.selectionEnd === 0 && query.value === '') {
-      const items = allSelectedItems.value;
-      if (items.length > 0) {
-        event.e.preventDefault();
-        const lastItem = items[items.length - 1];
-        removeSelectedItem(lastItem);
-        return;
-      }
-    }
-  }
-
   const delivery = chatSubmitShortcut(event.e, props.isReplying && props.canSteer);
   if (delivery) {
     event.e.preventDefault();
     if (props.composerLocked) return;
-    if (delivery === 'inject' && props.isReplying && props.canSteer) injectCurrentInput();
-    else void createSession(val, delivery);
+    // 空草稿 + 运行中：不再开新一轮，而是把队列里第一条补充消息立即发出，
+    // 省去用户手动点队列里的「补充当前任务」。输入法确认（isComposing /
+    // keyCode 229）已在函数入口返回，不会误触。
+    if (delivery === 'inject' && props.isReplying && props.canSteer) {
+      const queued = firstQueuedSteer.value;
+      if (!val.trim() && queued) {
+        emit('promote-steer', queued.steer_id);
+        return;
+      }
+      injectCurrentInput();
+      return;
+    }
+    void createSession(val, delivery);
   }
 }
 
@@ -2759,16 +2608,12 @@ const formatAgentNotReadyReasons = (
   isBuiltin: boolean,
 ): string[] => {
   return reasonKeys.map((key) => {
-    if (key === 'summary_model') {
+    if (key === 'chat_model') {
       return isBuiltin
         ? t('input.agentMissingSummaryModel')
         : t('input.customAgentMissingSummaryModel');
     }
-    if (key === 'rerank_model') {
-      return isBuiltin
-        ? t('input.agentMissingRerankModel')
-        : t('input.customAgentMissingRerankModel');
-    }
+    // 快速问答不需要 rerank 模型，已不再产生 rerank 未就绪原因。
     return t('input.agentMissingAllowedTools');
   });
 };
@@ -2779,7 +2624,14 @@ const collectAgentNotReadyReasons = (
   sourceTenantId?: string,
 ): { keys: AgentNotReadyReasonKey[]; labels: string[] } => {
   const isSharedAgent = !!sourceTenantId;
-  const keys = getAgentNotReadyReasonKeys(agent.config, allModels.value, {
+  // 内置智能体（快速问答等）的配置文件里本来就没有 model_id：它的对话模型
+  // 来自发送时随请求带上的 summary_model_id（即输入框当前选中的模型，后端
+  // 把它当 modelOverride 优先使用）。只看 agent.config 会把「已经选好模型」
+  // 误判成「未配置对话模型」，所以这里把当前选中模型也算作智能体的模型。
+  const effectiveConfig = agent.is_builtin && !isSharedAgent
+    ? { ...agent.config, model_id: agent.config?.model_id?.trim() || selectedModelId.value }
+    : agent.config;
+  const keys = getAgentNotReadyReasonKeys(effectiveConfig, allModels.value, {
     isAgentMode,
     isSharedAgent,
   });
@@ -2829,8 +2681,8 @@ const showAgentNotReadyMessage = (
         href: '#',
         onClick: (e: Event) => {
           e.preventDefault();
-          const section = resolveAgentNotReadySection(reasonKeys || ['summary_model'])
-          const highlight = resolveAgentNotReadyHighlight(reasonKeys || ['summary_model'])
+          const section = resolveAgentNotReadySection(reasonKeys || ['chat_model'])
+          const highlight = resolveAgentNotReadyHighlight(reasonKeys || ['chat_model'])
           goToAgentEditor(agent, section, highlight, sourceTenantId);
         },
         style: 'color: var(--td-brand-color); text-decoration: none; font-weight: 500; cursor: pointer; align-self: flex-start;',
@@ -2854,7 +2706,6 @@ const toggleWebSearch = () => {
   // 互斥：虽然不是弹出层，但操作时关闭其他弹出层体验更好
   showMention.value = false;
   showModelSelector.value = false;
-  showAgentModeSelector.value = false;
 
   // 如果智能体禁用了网络搜索，不允许开启
   if (isWebSearchDisabledByAgent.value) {
@@ -2953,6 +2804,39 @@ defineExpose({
    */
   prefill(text: string) {
     query.value = text;
+  },
+  /**
+   * 把一个已在服务端登记好的附件挂进输入框。
+   *
+   * 项目文件的 @ 引用走这里：文件已经由 /project-refs 变成临时附件，
+   * 前端不要重新上传字节。documentId 存在时发送阶段只传 attachment_ids，
+   * 与普通上传附件的处理完全一致，用户也能在 chip 上单独删掉它。
+   *
+   * 必须写进 AttachmentUpload 的内部状态：标签条渲染的是子组件的
+   * attachments，父组件的 uploadedAttachments 只驱动角标数字。之前只改父
+   * 状态，导致 @ 的文件只让角标 +1、标签条不出现，同一个文件多次 @ 还会
+   * 把数字加重复。
+   */
+  attachPreparedFile(file: { documentId: string; name: string; size: number }) {
+    if (!file.documentId) return;
+    const added = attachmentUploadRef.value?.addPreparedFile?.(file);
+    // 子组件不在（极少见）时退回父状态，至少保证发送时能带上这个附件。
+    if (!added && !uploadedAttachments.value.some(item => item.documentId === file.documentId)) {
+      uploadedAttachments.value = [
+        ...uploadedAttachments.value,
+        {
+          // 不经过本地 File 对象，这里的 file 仅用于满足类型；没有任何读取路径依赖它。
+          file: new File([], file.name),
+          id: file.documentId,
+          name: file.name,
+          size: file.size,
+          type: file.name.split('.').pop()?.toLowerCase() || '',
+          documentId: file.documentId,
+          status: 'ready',
+        },
+      ];
+    }
+    void focusInput();
   }
 });
 
@@ -3003,27 +2887,11 @@ defineExpose({
         @update:files="uploadedAttachments = $event" />
 
       <!-- 选中的知识库和文件标签（显示在输入框内顶部） -->
-      <div v-if="$slots.chips || (!embeddedMode && allSelectedItems.length > 0)" class="selected-tags-inline">
-        <slot name="chips" />
-        <span v-for="item in (embeddedMode ? [] : allSelectedItems)" :key="`${item.type}:${item.id}`" class="mention-chip" :class="[
-          getMentionChipClass(item),
-          { 'mention-chip--agent': item.isAgentConfigured }
-        ]">
-          <span class="mention-chip__icon-wrap" :class="{ 'has-org': item.org_name }">
-            <span class="mention-chip__icon">
-              <t-icon v-if="item.type === 'kb'" :name="item.kbType === 'faq' ? 'chat-bubble-help' : 'folder'" />
-              <t-icon v-else :name="getMentionIcon(item)" />
-            </span>
-            <span v-if="item.org_name" class="mention-chip__org-badge">
-              <img :src="getImgSrc(item.type === 'file' ? 'organization-grey.svg' : 'organization-green.svg')"
-                class="mention-chip__org-img" alt="" aria-hidden="true" />
-            </span>
-          </span>
-          <span class="mention-chip__name" :title="item.name">{{ item.name }}</span>
-          <span class="mention-chip__remove" @click.stop="removeSelectedItem(item)"
-            :aria-label="$t('common.remove')">×</span>
-        </span>
-      </div>
+      <!--
+        选中的知识库/文件不再显示在输入框内顶部，改为在下方 control-bar
+        里与模型选择器、插件按钮同排（见 .control-bar 内的 .selected-tags-inline）。
+        理由：输入框内的标签会把文本区顶下去，选中多个库时输入框高度来回跳。
+      -->
 
       <!-- 实际输入框 -->
       <t-textarea ref="textareaRef" v-model="query" :placeholder="t('input.placeholder')" name="description" :autosize="true"
@@ -3036,26 +2904,9 @@ defineExpose({
         <div class="control-left">
           <!-- 嵌入时宿主已定好 agent/KB，只保留模型选择 -->
           <template v-if="!embeddedMode">
-          <!-- Agent 模式切换按钮 -->
-          <div ref="agentModeButtonRef" class="control-btn agent-mode-btn" :class="{
-            'is-normal': !isCustomAgent && !isAgentEnabled,
-            'is-agent': !isCustomAgent && isAgentEnabled,
-            'is-custom': isCustomAgent
-          }" @click.stop="toggleAgentModeSelector">
-            <span class="agent-mode-text">
-              {{ selectedAgent.name || (isAgentEnabled ? $t('input.agentMode') : $t('input.normalMode')) }}
-            </span>
-            <svg width="12" height="12" viewBox="0 0 12 12" fill="currentColor" class="dropdown-arrow"
-              :class="{ 'rotate': showAgentModeSelector }">
-              <path d="M2.5 4.5L6 8L9.5 4.5H2.5Z" />
-            </svg>
-          </div>
-
-          <!-- Agent 选择器下拉菜单 -->
-          <AgentSelector :visible="showAgentModeSelector" :anchorEl="agentModeButtonRef"
-            :currentAgentId="selectedAgentId" :agents="enabledAgents" :all-models="allModels"
-            @close="closeAgentModeSelector" @select="handleSelectAgent" @not-ready="handleAgentNotReady" />
-
+          <!-- 匹配宿主布局用：桌面版只有一个固定助手，界面上不提供模式/智能体
+               选择入口。对话固定走 Agent 管线（见 views/chat/index.vue 的
+               agentEnabled），由模型自行判断是否需要检索或写文件。 -->
           <HostApprovalModeSelect v-if="hostApprovalModeVisible && sessionId" :session-id="sessionId" />
 
           <t-tooltip v-if="settingsStore.isAgentStreamMode" placement="top" theme="light"
@@ -3140,13 +2991,16 @@ defineExpose({
             <div class="control-btn attachment-upload-btn" :class="{ 'active': uploadedAttachments.length > 0 }"
               @click.stop="attachmentUploadRef?.triggerFileSelect()">
               <!-- 回形针图标 -->
-              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"
                 stroke-linecap="round" stroke-linejoin="round" class="control-icon">
                 <path
                   d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48" />
               </svg>
-              <span v-if="uploadedAttachments.length > 0" class="attachment-count">{{ uploadedAttachments.length
-              }}</span>
+              <!--
+                不在按钮上挂数字角标：附件已经在输入框里以标签形式逐个列出
+                （含文件名、大小、状态、可删除），角标是同一信息的重复表达，
+                而且同一个文件 @ 多次时数字还会误导。只用 active 态提示"有附件"。
+              -->
             </div>
           </t-tooltip>
 
@@ -3204,6 +3058,38 @@ defineExpose({
               </svg>
             </div>
           </t-tooltip>
+          <!--
+            已选知识库 / 文件标签：与模型选择器、插件按钮同处 control-bar 一行。
+            flex-shrink 让它在空间不足时先被压缩（露出末尾省略），
+            而模型名与插件按钮保持完整，避免工具条换行。
+          -->
+          <div v-if="$slots.chips || (!embeddedMode && allSelectedItems.length > 0)" class="selected-tags-inline">
+            <slot name="chips" />
+            <span v-for="item in (embeddedMode ? [] : allSelectedItems)" :key="`${item.type}:${item.id}`" class="mention-chip" :class="[
+              getMentionChipClass(item),
+              { 'mention-chip--agent': item.isAgentConfigured }
+            ]">
+              <span class="mention-chip__icon-wrap" :class="{ 'has-org': item.org_name }">
+                <span class="mention-chip__icon">
+                  <t-icon v-if="item.type === 'kb'" :name="item.kbType === 'faq' ? 'chat-bubble-help' : 'folder'" />
+                  <t-icon v-else :name="getMentionIcon(item)" />
+                </span>
+                <span v-if="item.org_name" class="mention-chip__org-badge">
+                  <img :src="getImgSrc(item.type === 'file' ? 'organization-grey.svg' : 'organization-green.svg')"
+                    class="mention-chip__org-img" alt="" aria-hidden="true" />
+                </span>
+              </span>
+              <span class="mention-chip__name" :title="item.name">{{ item.name }}</span>
+              <!-- 删除入口：鼠标点 × 或键盘 Tab 到 × 后回车/空格。
+                   不再用「输入框为空时按退格」这条捷径：chip 在 textarea 之外，
+                   退格删它没有任何视觉焦点提示，删完还直接落盘（见 §11）。 -->
+              <span class="mention-chip__remove" role="button" tabindex="0"
+                @click.stop="removeSelectedItem(item)"
+                @keydown.enter.prevent.stop="removeSelectedItem(item)"
+                @keydown.space.prevent.stop="removeSelectedItem(item)"
+                :aria-label="$t('common.remove')">×</span>
+            </span>
+          </div>
           <slot name="background-work" />
           </template>
           <slot v-if="embeddedMode" name="background-work" />
@@ -3213,67 +3099,122 @@ defineExpose({
           <!-- 模型显示 -->
           <t-tooltip :content="modelTriggerTooltip" :disabled="!modelTriggerTooltip">
             <div class="model-display" :class="{ 'agent-controlled': isModelLockedByAgent }">
+              <!--
+                合并触发器：模型与思考强度原先各有一个按钮，两个加起来占掉
+                约 260px，是输入框底部工具条在窄栏下换行的主因。
+                现在合成一个胶囊：完整模型名（限宽 150px，超出省略号）
+                + 强度徽标，点开后浮层顶部有「模型 / 思考强度 / 召回参数」
+                三个二级菜单。完整模型名同时挂在 tooltip 上。
+              -->
               <div ref="modelButtonRef" class="model-selector-trigger" @click.stop="toggleModelSelector">
-                <span class="model-selector-name">
-                  {{ selectedModelDisplayName }}
-                </span>
-                <span v-if="followsDefaultModel && composerModel" class="model-selector-default">
-                  {{ $t('input.modelAuto') }}
-                </span>
+                <span class="model-selector-name" :title="selectedModelDisplayName">{{ selectedModelDisplayName }}</span>
                 <span
-                  v-else-if="selectedModelContextLabel"
-                  class="model-selector-ctx"
-                  :class="{ 'is-default': selectedModelContextIsDefault }"
-                  :title="selectedModelContextTitle"
-                >{{ selectedModelContextLabel }}</span>
-                <svg width="12" height="12" viewBox="0 0 12 12" fill="currentColor" class="model-dropdown-arrow"
+                  v-if="reasoningBadgeText"
+                  class="model-selector-effort"
+                  :class="`is-${displayedReasoningLevel}`"
+                >{{ reasoningBadgeText }}</span>
+                <svg width="10" height="10" viewBox="0 0 12 12" fill="currentColor" class="model-dropdown-arrow"
                   :class="{ 'rotate': showModelSelector }">
                   <path d="M2.5 4.5L6 8L9.5 4.5H2.5Z" />
                 </svg>
               </div>
             </div>
           </t-tooltip>
-          <t-popup v-if="!embeddedMode && reasoningLevels.length > 0" v-model:visible="showReasoningSelector"
-            trigger="click" placement="top-right" :disabled="composerLocked"
-            :overlay-inner-style="{ padding: '4px', borderRadius: 'var(--app-radius-lg)' }"
-            @visible-change="handleReasoningVisibleChange">
-            <button type="button" class="model-selector-trigger reasoning-effort-trigger"
-              :disabled="composerLocked" :class="{ disabled: composerLocked }"
-              :aria-label="`${$t('modelSettings.debug.reasoningEffort')}: ${$t(levelLabelKey(displayedReasoningLevel))}`"
-              :title="$t('modelSettings.debug.reasoningEffort')" aria-haspopup="menu" :aria-expanded="showReasoningSelector"
-              @keydown.esc="showReasoningSelector = false">
-              <span class="model-selector-name">{{ $t(levelLabelKey(displayedReasoningLevel)) }}</span>
-              <svg width="12" height="12" viewBox="0 0 12 12" fill="currentColor" class="model-dropdown-arrow"
-                :class="{ rotate: showReasoningSelector }">
-                <path d="M2.5 4.5L6 8L9.5 4.5H2.5Z" />
-              </svg>
-            </button>
-            <template #content>
-              <div class="reasoning-effort-menu" role="menu" :aria-label="$t('modelSettings.debug.reasoningEffort')"
-                @keydown.esc="showReasoningSelector = false">
-                <div class="reasoning-effort-title" role="presentation">{{ $t('modelSettings.debug.reasoningEffort') }}</div>
-                <button v-for="level in reasoningLevels" :key="level" type="button" role="menuitemradio"
-                  class="reasoning-effort-option" :class="{ selected: level === displayedReasoningLevel }"
-                  :aria-checked="level === displayedReasoningLevel" @click="selectReasoningLevel(level)">
-                  <span>{{ $t(levelLabelKey(level)) }}</span>
-                  <t-icon v-if="level === displayedReasoningLevel" name="check" size="14px" />
-                </button>
-              </div>
-            </template>
-          </t-popup>
+          <!--
+            OEM 改造：对话面板手动插件勾选区。
+            只有用户在这里亲自勾选，本次请求才会带上 skill_names；
+            未勾选时请求体不含该字段，等于不加载任何插件。
+            后端 /agent-chat 已关闭，插件不会被 Agent 自动调度。
+          -->
+          <OemPluginPicker v-if="!embeddedMode" />
+
         </div>
 
         <Teleport to="body">
           <div v-if="showModelSelector" class="model-selector-overlay" @click="closeModelSelector">
             <div class="model-selector-dropdown" :style="modelDropdownStyle" @click.stop>
-              <div class="model-selector-header">
+              <!--
+                二级菜单导航：左窄栏两个入口，右侧渲染对应面板。
+                以前「模型」和「思考强度」是两个独立浮层，现在合并为一个，
+                既省掉一个触发按钮，也让「换模型 + 调强度」一次点开完成。
+              -->
+              <div class="model-selector-nav" role="tablist">
+                <button type="button" role="tab" class="model-selector-nav__item"
+                  :class="{ active: dropdownPane === 'model' }" :aria-selected="dropdownPane === 'model'"
+                  @click="dropdownPane = 'model'">
+                  <t-icon name="control-platform" size="14px" />
+                  <span>{{ $t('input.mergeMenu.model') }}</span>
+                </button>
+                <button v-if="!embeddedMode && reasoningLevels.length > 0" type="button" role="tab"
+                  class="model-selector-nav__item" :class="{ active: dropdownPane === 'reasoning' }"
+                  :aria-selected="dropdownPane === 'reasoning'" @click="dropdownPane = 'reasoning'">
+                  <t-icon name="chart-bubble" size="14px" />
+                  <span>{{ $t('modelSettings.debug.reasoningEffort') }}</span>
+                </button>
+                <!-- 召回参数：原先是工具条里独立的「召回参数」按钮 + 自己的浮层，
+                     现并入本浮层。它是空间级检索配置，调整频率低于模型与强度，
+                     放在第三个 Tab 里既保留可达性又不占工具条宽度。 -->
+                <button v-if="!embeddedMode" type="button" role="tab"
+                  class="model-selector-nav__item" :class="{ active: dropdownPane === 'recall' }"
+                  :aria-selected="dropdownPane === 'recall'" @click="dropdownPane = 'recall'">
+                  <t-icon name="search" size="14px" />
+                  <span>{{ $t('oemToolbar.recall') }}</span>
+                </button>
+              </div>
+
+              <div class="model-selector-pane">
+              <div class="model-selector-header" v-if="dropdownPane === 'model'">
                 <span>{{ $t('conversationSettings.models.chatGroupLabel') }}</span>
                 <button class="model-selector-add" type="button" @click="handleModelChange('__add_model__')">
                   <span class="add-icon">+</span>
                   <span class="add-text">{{ $t('input.addModel') }}</span>
                 </button>
               </div>
-              <div class="model-selector-content">
+              <!-- 思考强度面板：档位来自所选模型上报的 thinking_levels -->
+              <div v-if="dropdownPane === 'reasoning'" class="reasoning-effort-menu" role="menu"
+                :aria-label="$t('modelSettings.debug.reasoningEffort')">
+                <button v-for="level in reasoningLevels" :key="level" type="button" role="menuitemradio"
+                  class="reasoning-effort-option" :class="{ selected: level === displayedReasoningLevel }"
+                  :aria-checked="level === displayedReasoningLevel" @click="selectReasoningLevel(level)">
+                  <span class="reasoning-effort-option__label">{{ $t(levelLabelKey(level)) }}</span>
+                  <span class="reasoning-effort-option__desc">{{ $t(levelDescriptionKey(level)) }}</span>
+                  <t-icon v-if="level === displayedReasoningLevel" name="check" size="14px" />
+                </button>
+              </div>
+              <!-- 召回参数面板 -->
+              <div v-if="dropdownPane === 'recall'" class="recall-pane">
+                <div class="recall-pane__row">
+                  <label>{{ $t('oemToolbar.embeddingTopK') }}</label>
+                  <t-input-number v-model="recallForm.embedding_top_k" :min="1" :max="200" :step="5"
+                    size="small" :disabled="!canEditRecall" />
+                </div>
+                <div class="recall-pane__row">
+                  <label>{{ $t('oemToolbar.rerankTopK') }}</label>
+                  <t-input-number v-model="recallForm.rerank_top_k" :min="1" :max="50" :step="1"
+                    size="small" :disabled="!canEditRecall" />
+                </div>
+                <div class="recall-pane__row">
+                  <label>{{ $t('oemToolbar.vectorThreshold') }}</label>
+                  <t-slider v-model="recallForm.vector_threshold" :min="0" :max="1" :step="0.05"
+                    :disabled="!canEditRecall" />
+                  <span class="recall-pane__value">{{ recallForm.vector_threshold.toFixed(2) }}</span>
+                </div>
+                <div class="recall-pane__row">
+                  <label>{{ $t('oemToolbar.keywordThreshold') }}</label>
+                  <t-slider v-model="recallForm.keyword_threshold" :min="0" :max="1" :step="0.05"
+                    :disabled="!canEditRecall" />
+                  <span class="recall-pane__value">{{ recallForm.keyword_threshold.toFixed(2) }}</span>
+                </div>
+                <div class="recall-pane__footer">
+                  <span v-if="!canEditRecall" class="recall-pane__hint">{{ $t('oemToolbar.adminOnly') }}</span>
+                  <span v-else-if="recallSaveState === 'saved'" class="recall-pane__hint is-ok">{{ $t('oemToolbar.saved') }}</span>
+                  <span v-else-if="recallSaveState === 'saving'" class="recall-pane__hint">{{ $t('oemToolbar.saving') }}</span>
+                  <span v-else-if="recallSaveState === 'error'" class="recall-pane__hint is-error">{{ $t('oemToolbar.saveFailed') }}</span>
+                  <t-button v-if="canEditRecall" size="small" theme="primary" variant="outline"
+                    @click="resetRecall">{{ $t('oemToolbar.resetRecall') }}</t-button>
+                </div>
+              </div>
+              <div class="model-selector-content" v-if="dropdownPane === 'model'">
                 <div v-if="embeddedMode && embeddedDefaultModel" class="model-option"
                   :class="{ selected: followsDefaultModel }"
                   :title="$t('input.modelAutoHint')" @click="handleModelChange(EMBEDDED_AUTO_MODEL)">
@@ -3292,8 +3233,8 @@ defineExpose({
                   @click="handleModelChange(model.id || '')">
                   <div class="model-option-left">
                     <div class="model-option-name-wrap">
-                      <span class="model-option-name">{{ modelDisplayName(model) }}</span>
-                      <span v-if="model.display_name" class="model-option-raw-name">{{ model.name }}</span>
+                      <span class="model-option-name" :title="modelDisplayName(model)">{{ modelDisplayName(model) }}</span>
+                      <span v-if="model.display_name" class="model-option-raw-name" :title="model.name">{{ model.name }}</span>
                     </div>
                   </div>
                   <span
@@ -3308,6 +3249,7 @@ defineExpose({
                 <div v-if="availableModels.length === 0" class="model-option empty">
                   {{ $t('input.noModel') }}
                 </div>
+              </div>
               </div>
             </div>
           </div>
@@ -3453,7 +3395,7 @@ const getImgSrc = (url: string) => {
 .rich-input-container {
   position: relative;
   width: 100%;
-  max-width: 960px;
+  max-width: 680px;
   background: var(--td-bg-color-container);
   border-radius: var(--app-radius-xl);
   border: 1px solid var(--td-component-stroke);
@@ -3465,23 +3407,36 @@ const getImgSrc = (url: string) => {
 }
 
 /* 选中的知识库/文件标签（mention list 已选项） */
+/* 选中的知识库/文件标签（mention list 已选项）
+   现位于底部 control-bar 内，与模型选择器、插件按钮同排。
+   不换行（nowrap）：工具条必须保持单行；空间不足时整组先被压缩，
+   由 mention-chip 自身的溢出规则露出省略号。
+   注意 padding/margin/背景必须归零——原先为「输入框内顶部」写的
+   12px 16px 0 会把整个工具条撑高 12px 并挤歪垂直对齐。 */
 .selected-tags-inline {
   display: flex;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   align-items: center;
-  gap: 6px;
-  padding: 12px 16px 0;
-  background: var(--td-bg-color-container);
-  border-radius: 11px 11px 0 0;
-  /* 与 .rich-input-container 内缘上边圆角一致（12px - 1px 边框） */
+  gap: 4px;
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  background: transparent;
+  border-radius: 0;
+  /* 与其他控件争抢宽度时优先被压缩 */
+  flex: 0 1 auto;
+  overflow: hidden;
 }
 
-.rich-input-container:has(.selected-tags-inline) :deep(.t-textarea__inner) {
-  padding-top: 8px;
-}
-
+// 工具条内的 chip：单行不换行，超出部分由名字省略号吃掉。
+// max-width 防单个超长知识库名把整条工具条撑爆；高度压到 22px
+// 与相邻的 24px 图标按钮视觉齐平（基础样式 min-height 26px 会撑高整行）。
 .mention-chip {
   .chat-resource-chip-surface();
+  max-width: 180px;
+  min-height: 22px;
+  padding: 1px 6px;
+  flex: 0 0 auto;
 
   display: inline-flex;
   align-items: center;
@@ -3575,6 +3530,15 @@ const getImgSrc = (url: string) => {
   opacity: 1;
   background: var(--td-bg-color-component);
   color: var(--td-text-color-primary);
+}
+
+/* 键盘 Tab 到删除按钮时给出焦点环，否则看不见焦点在哪 */
+.mention-chip__remove:focus-visible,
+.mention-chip:focus-within .mention-chip__remove {
+  opacity: 1;
+  outline: 2px solid var(--td-brand-color);
+  outline-offset: 1px;
+  background: var(--td-bg-color-component);
 }
 
 /* 标签表面保持中性，仅用图标颜色表达资源类型。 */
@@ -3685,9 +3649,14 @@ const getImgSrc = (url: string) => {
     }
 
     // Let long model names shrink before the fixed controls wrap or move.
+    // 上限 150px：模型名是这一条里唯一可以截断的信息（悬停有 title），
+    // 不设上限时 Qwen3.6-35B-A3B-4bit 这类长名会吃掉 211px 直接导致换行。
     .model-display {
       flex-shrink: 1;
       min-width: 0;
+      // 190px：足够完整显示 Qwen3.6-35B-A3B-4bit 这类长名（实测约 139px），
+      // 再长的名字才触发省略号。工具条余量充足，单行不受影响。
+      max-width: 190px;
     }
 
     .model-selector-trigger {
@@ -3718,6 +3687,7 @@ const getImgSrc = (url: string) => {
 .control-left {
   display: flex;
   align-items: center;
+  /* 间距 6 -> 4：7 个控件时省下约 12px，配合按钮缩小让整条留在单行 */
   gap: 4px;
   flex: 1;
   flex-wrap: wrap;
@@ -3731,7 +3701,7 @@ const getImgSrc = (url: string) => {
   align-items: center;
   justify-content: center;
   gap: 4px;
-  padding: 6px 10px;
+  padding: 4px 8px;
   border-radius: var(--app-radius-sm);
   color: var(--td-text-color-secondary);
   cursor: pointer;
@@ -3753,51 +3723,14 @@ const getImgSrc = (url: string) => {
   }
 }
 
-.agent-mode-btn {
-  height: 28px;
-  padding: 0 8px 0 10px;
-  margin-right: 4px;
-  box-sizing: border-box;
-  min-width: auto;
-  font-weight: 500;
-  position: relative;
-  border-radius: var(--app-radius-pill);
-  background: var(--td-bg-color-secondarycontainer);
-}
-
-.agent-icon {
-  width: 18px;
-  height: 18px;
-  flex-shrink: 0;
-}
-
-.agent-btn-icon {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 20px;
-  height: 20px;
-  border-radius: 5px;
-  flex-shrink: 0;
-  color: var(--td-text-color-secondary);
-}
-
-.agent-mode-text {
-  font-size: var(--app-text-md);
-  color: var(--td-text-color-secondary);
-  font-weight: 500;
-  white-space: nowrap;
-  margin: 0 2px;
-}
-
 .control-icon {
-  width: 18px;
-  height: 18px;
+  width: 16px;
+  height: 16px;
 }
 
 .kb-btn {
-  height: 28px;
-  width: 28px;
+  height: 24px;
+  width: 24px;
   padding: 0;
   min-width: auto;
   position: relative;
@@ -3927,8 +3860,8 @@ const getImgSrc = (url: string) => {
 
 /* Attachment upload */
 .attachment-upload-btn {
-  width: 28px;
-  height: 28px;
+  width: 24px;
+  height: 24px;
   padding: 0;
   min-width: auto;
   display: flex;
@@ -3945,22 +3878,6 @@ const getImgSrc = (url: string) => {
   &.active {
     background: var(--td-bg-color-secondarycontainer);
     color: var(--td-brand-color);
-  }
-
-  .attachment-count {
-    position: absolute;
-    top: -2px;
-    right: -2px;
-    background: var(--td-brand-color);
-    color: var(--td-text-color-anti);
-    font-size: var(--app-text-2xs);
-    width: 14px;
-    height: 14px;
-    border-radius: 50%;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    line-height: 1;
   }
 }
 
@@ -4008,8 +3925,8 @@ const getImgSrc = (url: string) => {
 }
 
 .browser-source-btn {
-  width: 28px;
-  height: 28px;
+  width: 24px;
+  height: 24px;
   padding: 0;
   background: transparent;
 
@@ -4207,13 +4124,14 @@ const getImgSrc = (url: string) => {
   line-height: 20px;
 }
 
+// 合并进模型浮层后，强度选项有了足够横向空间，于是把每个档位的一行说明
+// 也带出来——档位名（「高」「最大」）单独看不够自解释。
 .reasoning-effort-option {
   display: flex;
   align-items: center;
-  justify-content: space-between;
-  gap: 16px;
+  gap: 10px;
   min-height: 30px;
-  padding: 4px 8px;
+  padding: 6px 10px;
   border: 0;
   border-radius: var(--app-radius-sm);
   background: transparent;
@@ -4232,6 +4150,27 @@ const getImgSrc = (url: string) => {
     background: var(--td-bg-color-secondarycontainer);
     color: var(--td-brand-color);
   }
+
+  &__label {
+    flex: 0 0 auto;
+    min-width: 44px;
+    font-weight: 500;
+  }
+
+  &__desc {
+    flex: 1;
+    min-width: 0;
+    color: var(--td-text-color-placeholder);
+    font-size: var(--app-text-xs);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  & .t-icon {
+    flex: 0 0 auto;
+    margin-left: auto;
+  }
 }
 
 .model-display {
@@ -4248,20 +4187,74 @@ const getImgSrc = (url: string) => {
   }
 }
 
+/*
+ * OEM：输入框底部这一行现在并排三个控件（模型 / 召回参数 / 插件）。
+ * 统一成同一套「描边胶囊」规格，否则模型（原本无边框 28px）和
+ * 插件、召回（有边框 26px）并排时基线不齐、视觉也不像一组。
+ * 高度 26px = 3px 上下内边距 + 1px 边框 + 18px 行高，与另两个按钮一致。
+ */
+// 强度徽标：关闭态不渲染，其余档位用不同色阶区分强弱。
+.model-selector-effort {
+  padding: 0 4px;
+  border-radius: var(--app-radius-sm);
+  font-size: var(--app-text-xs);
+  line-height: 16px;
+  flex: 0 0 auto;
+  color: var(--td-text-color-secondary);
+  background: var(--td-bg-color-secondarycontainer);
+
+  &.is-auto,
+  &.is-minimal {
+    color: var(--td-text-color-secondary);
+  }
+
+  &.is-low,
+  &.is-medium {
+    color: var(--td-brand-color);
+    background: var(--td-brand-color-light);
+  }
+
+  &.is-high,
+  &.is-xhigh,
+  &.is-max {
+    color: var(--td-warning-color, #e37318);
+    background: var(--td-warning-color-light, #fff1e9);
+  }
+}
+
+// 模型名：触发器上直接展示完整名称，超出 150px 才省略。
+// 浮层列表里复用的同名类走 .model-option-name，互不影响。
+.model-selector-name {
+  max-width: 150px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .model-selector-trigger {
   display: flex;
   align-items: center;
-  gap: 6px;
-  padding: 0 8px;
-  height: 28px;
+  gap: 4px;
+  padding: 2px 6px;
+  /* 固定 24px：与左侧 24px 圆形图标按钮、插件/召回触发器同高，整条视觉齐平。 */
+  height: 24px;
   box-sizing: border-box;
-  border: 0;
-  border-radius: var(--app-radius-sm);
+  border: 1px solid var(--td-component-stroke);
+  border-radius: var(--app-radius-md);
+  background: transparent;
   transition: background var(--app-motion-instant), border-color var(--app-motion-instant);
   cursor: pointer;
 
   &:hover {
-    background: var(--td-bg-color-secondarycontainer-hover);
+    background: var(--td-bg-color-container-hover);
+  }
+
+  // 下拉展开时与「召回参数」按钮的打开态保持同一视觉反馈
+  &:focus-visible {
+    outline: none;
+    border-color: var(--td-brand-color);
+    color: var(--td-brand-color);
   }
 
   &.disabled {
@@ -4354,6 +4347,103 @@ const getImgSrc = (url: string) => {
     opacity: 1;
     transform: scale(1);
   }
+}
+
+// 二级菜单：左侧竖排两个入口，右侧渲染对应面板。
+.model-selector-nav {
+  display: flex;
+  gap: 2px;
+  padding: 6px 6px 0;
+  border-bottom: .5px solid var(--td-component-stroke);
+  flex: 0 0 auto;
+
+  &__item {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    padding: 4px 10px;
+    border: 0;
+    border-radius: var(--app-radius-sm) var(--app-radius-sm) 0 0;
+    background: transparent;
+    color: var(--td-text-color-secondary);
+    font: inherit;
+    font-size: var(--app-text-sm);
+    line-height: 20px;
+    cursor: pointer;
+
+    &:hover {
+      color: var(--td-text-color-primary);
+    }
+
+    &.active {
+      background: var(--td-bg-color-secondarycontainer);
+      color: var(--td-brand-color);
+      font-weight: 500;
+    }
+  }
+}
+
+// 召回参数面板：四项检索参数 + 保存状态 + 重置
+.recall-pane {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 12px 14px;
+
+  &__row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+
+    label {
+      flex: 0 0 88px;
+      color: var(--td-text-color-secondary);
+      font-size: var(--app-text-sm);
+    }
+
+    :deep(.t-slider) {
+      flex: 1;
+      min-width: 0;
+    }
+
+    :deep(.t-input-number) {
+      width: 96px;
+    }
+  }
+
+  &__value {
+    flex: 0 0 34px;
+    color: var(--td-text-color-placeholder);
+    font-size: var(--app-text-xs);
+    text-align: right;
+    font-variant-numeric: tabular-nums;
+  }
+
+  &__footer {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    padding-top: 4px;
+    border-top: .5px solid var(--td-component-stroke);
+  }
+
+  &__hint {
+    font-size: var(--app-text-xs);
+    color: var(--td-text-color-placeholder);
+
+    &.is-ok { color: var(--td-success-color); }
+    &.is-error { color: var(--td-error-color); }
+  }
+}
+
+.model-selector-pane {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
 }
 
 .model-selector-header {
@@ -4466,7 +4556,11 @@ const getImgSrc = (url: string) => {
   flex: 1;
 }
 
+// 模型名最多占 190px（浮层 400px 减去上下文窗口、勾选与两侧留白），
+// 超出用省略号；完整名称同时挂在 title 属性上，悬停可见。
+// 未设上限时 flex 会把长名压到比上下文窗口还窄，截断点随机。
 .model-option-name {
+  max-width: 190px;
   font-size: var(--app-text-sm);
   color: var(--td-text-color-primary);
   white-space: nowrap;
@@ -4476,9 +4570,14 @@ const getImgSrc = (url: string) => {
 }
 
 .model-option-raw-name {
+  min-width: 0;
+  max-width: 120px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   font-size: var(--app-text-xs);
   color: var(--td-text-color-placeholder);
-  flex-shrink: 0;
+  flex-shrink: 1;
 }
 
 .model-option-ctx {

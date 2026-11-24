@@ -91,3 +91,26 @@ func TestLoadDesktopEnvHonoursAnExplicitFile(t *testing.T) {
 	t.Setenv("ENV_FILE", filepath.Join(t.TempDir(), "missing.env"))
 	require.Error(t, loadDesktopEnv("", false), "a file asked for by name must exist")
 }
+
+func TestDesktopConfigRootHonoursTheResourceRootOverride(t *testing.T) {
+	appDir := t.TempDir()
+	resources := filepath.Join(appDir, "usr", "share", "国研智研体")
+	writeConfig(t, resources)
+	// 可执行文件在 usr/bin，向上找不到 config —— 只有环境变量能救
+	exe := filepath.Join(appDir, "usr", "bin", "国研智研体")
+	t.Setenv("WEKNORA_RESOURCE_ROOT", resources)
+
+	root, ok := desktopConfigRoot(exe)
+	require.True(t, ok)
+	require.Equal(t, resources, root)
+}
+
+func TestDesktopConfigRootIgnoresAStaleResourceRootOverride(t *testing.T) {
+	repo := t.TempDir()
+	writeConfig(t, repo)
+	t.Setenv("WEKNORA_RESOURCE_ROOT", filepath.Join(t.TempDir(), "gone"))
+
+	root, ok := desktopConfigRoot(filepath.Join(repo, "cmd", "desktop", "run"))
+	require.True(t, ok)
+	require.Equal(t, repo, root)
+}

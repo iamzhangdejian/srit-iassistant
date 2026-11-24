@@ -26,6 +26,11 @@ var DeploymentCapabilityKeys = []string{
 	"settings.sandbox.host",
 	"settings.sandbox.remote",
 	"settings.sandbox.user_allocation",
+	// 浏览器插件配对（/me/browser）。OEM 交付恒为 false，前端据此不轮询。
+	"integrations.browserskill",
+	// 项目目录（原生选择框 + 已授权目录表）。与「本机沙箱」解耦：
+	// Windows 目前没有沙箱后端，但项目、项目文件与会话归属照常可用。
+	"settings.projectdir",
 }
 
 // DeploymentCapability describes whether a deployment exposes a feature route.
@@ -57,6 +62,12 @@ type DeploymentFeatureAvailability struct {
 	SandboxHost           bool
 	SandboxRemote         bool
 	SandboxUserAllocation bool
+	// BrowserSkill 浏览器自动化（本地浏览器插件配对）。OEM 交付里由
+	// FeatCutBrowserSkill 关闭；前端据此决定要不要轮询 /api/v1/me/browser。
+	BrowserSkill bool
+	// ProjectDir 是否注入原生目录选择器（cmd/desktop 会注入，普通 server 不会）。
+	// 决定前端「项目」入口与「先选项目」闸门是否有解，与沙箱能力无关。
+	ProjectDir bool
 }
 
 func supportedDeploymentCapability(supported bool) DeploymentCapability {
@@ -131,6 +142,8 @@ func BuildDeploymentCapabilities(
 			"settings.sandbox.host":            sandboxHost,
 			"settings.sandbox.remote":          sandboxRemote,
 			"settings.sandbox.user_allocation": sandboxUserAllocation,
+			"integrations.browserskill":        supportedDeploymentCapability(available.BrowserSkill),
+			"settings.projectdir":              supportedDeploymentCapability(available.ProjectDir),
 		},
 	}
 }

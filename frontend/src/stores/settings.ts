@@ -1,8 +1,7 @@
 import { defineStore } from "pinia";
 import { nextTick } from "vue";
-import { BUILTIN_QUICK_ANSWER_ID, BUILTIN_SMART_REASONING_ID } from "@/api/agent";
+import { BUILTIN_MAIN_ASSISTANT_ID, BUILTIN_QUICK_ANSWER_ID, BUILTIN_SMART_REASONING_ID } from "@/api/agent";
 import { getApiBaseUrl } from "@/utils/api-base";
-import { isAgentStreamAgentId } from "@/utils/agent-mode";
 import { loadAndReconcileSettings } from "@/stores/settingsStorage";
 import { isReasoningLevel, type ReasoningLevel } from "@/utils/reasoningEffort";
 
@@ -106,7 +105,9 @@ const defaultSettings: Settings = {
     rerankModelId: "",
     selectedChatModelId: "",  // 用户当前选择的对话模型ID
   },
-  selectedAgentId: BUILTIN_QUICK_ANSWER_ID,  // 默认选中快速问答模式
+  // 桌面版唯一助手。输入框不再展示选择入口，这个字段仅作为「当前助手」
+  // 的记录位；真正发给后端的 agent_id 由对话页固定传 BUILTIN_MAIN_ASSISTANT_ID。
+  selectedAgentId: BUILTIN_MAIN_ASSISTANT_ID,
   selectedAgentSourceTenantId: null as string | null,  // 共享智能体来源空间 ID
   autoCheckUpdate: true,
 };
@@ -130,16 +131,17 @@ export const useSettingsStore = defineStore("settings", {
     // Agent 是否启用
     isAgentEnabled: (state) => state.settings.isAgentEnabled || false,
 
-    // 当前是否为内置快速问答（优先看 selectedAgentId，避免与 isAgentEnabled 漂移）
-    isQuickAnswerMode: (state) =>
-      (state.settings.selectedAgentId || BUILTIN_QUICK_ANSWER_ID) === BUILTIN_QUICK_ANSWER_ID,
+    // 当前是否为内置快速问答。桌面版没有模式切换，恒为 false——保留这个
+    // getter 是因为还有组件把它当作「只读 RAG 管线」的判据引用。
+    isQuickAnswerMode: () => false,
 
-    // 是否走 Agent 流式管线（智能推理 / 自定义 Agent）；快速问答走 RAG 管线
-    isAgentStreamMode: (state) =>
-      isAgentStreamAgentId(
-        state.settings.selectedAgentId,
-        state.settings.isAgentEnabled || false,
-      ),
+    // 是否走 Agent 流式管线。
+    //
+    // 桌面版固定走 Agent 管线：输入框里不再有智能体/模式下拉，selectedAgentId
+    // 也不再参与决定——向量库里的历史值可能还写着 builtin-quick-answer，
+    // 若继续读它，知识库锁定、技能区、联网搜索这些依赖本开关的判断都会
+    // 误判成「快速问答模式」。
+    isAgentStreamMode: () => true,
     
     // Agent 是否就绪（配置完整）
     // 需要满足：1) 配置了允许的工具 2) 设置了对话模型 3) 设置了重排模型
@@ -179,7 +181,7 @@ export const useSettingsStore = defineStore("settings", {
     isAutoCheckUpdateEnabled: (state) => state.settings.autoCheckUpdate ?? true,
 
     // 当前选中的智能体ID
-    selectedAgentId: (state) => state.settings.selectedAgentId || BUILTIN_QUICK_ANSWER_ID,
+    selectedAgentId: (state) => state.settings.selectedAgentId || BUILTIN_MAIN_ASSISTANT_ID,
     // 共享智能体来源空间 ID（可选）
     selectedAgentSourceTenantId: (state) => state.settings.selectedAgentSourceTenantId ?? null,
   },

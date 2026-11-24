@@ -44,18 +44,34 @@
                 </transition>
             </div>
             <div class="create-chat-composer">
-                <div v-if="hostSandboxEnabled" class="project-dir-bar">
-                    <button type="button" class="project-dir-bar__btn"
-                        :class="{ 'is-bound': !!selectedProjectDir, 'is-picking': pickingProjectDir }"
-                        :disabled="pickingProjectDir" :title="selectedProjectDir || $t('createChat.openProject')"
-                        @click="openProjectDir">
-                        <t-icon :name="pickingProjectDir ? 'loading' : 'folder'" />
-                        <span class="project-dir-bar__name">{{
-                            selectedProjectDir ? projectDirBasename(selectedProjectDir) : $t('createChat.openProject')
-                        }}</span>
-                    </button>
-                    <button v-if="selectedProjectDir" type="button" class="project-dir-bar__clear"
-                        :aria-label="$t('createChat.clearProject')" @click="clearProjectDir">×</button>
+                <!--
+                    会话归属的项目。
+                    这里刻意不做成可切换的下拉：一个项目绑定一个本地目录，
+                    对话中途换项目等于换工作目录，上下文会错位。
+                    已有项目时只做只读展示；没带项目时下面直接给出可选列表，
+                    让用户点一下就能开始，而不是只丢一句「请从左侧新建会话」
+                    却找不到入口（那个 + 图标只在悬停项目行时才出现）。
+                -->
+                <div v-if="hostSandboxEnabled && activeProject" class="project-dir-bar is-bound">
+                    <t-icon name="folder" size="16px" class="project-dir-bar__icon" />
+                    <span class="project-dir-bar__name" :title="activeProject.host_dir">{{ activeProject.name }}</span>
+                </div>
+                <div v-else-if="hostSandboxEnabled && projectsReady" class="project-dir-bar is-empty">
+                    <div class="project-picker">
+                        <p class="project-picker__hint">{{ t('project.pickFirst') }}</p>
+                        <div v-if="projectStore.projects.length" class="project-picker__list">
+                            <button v-for="project in projectStore.projects" :key="project.id" type="button"
+                                class="project-picker__item" :title="project.host_dir"
+                                @click="pickProject(project)">
+                                <t-icon name="folder" size="16px" />
+                                <span class="project-picker__name">{{ project.name }}</span>
+                                <span v-if="project.is_default" class="project-picker__badge">{{ t('project.default') }}</span>
+                            </button>
+                        </div>
+                        <button v-else type="button" class="project-picker__create" @click="createProjectThenStart">
+                            {{ t('project.createFirst') }}
+                        </button>
+                    </div>
                 </div>
                 <InputField ref="inputFieldRef" @send-msg="sendMsg"></InputField>
             </div>
@@ -73,8 +89,11 @@
 import { ref, watch, onMounted, nextTick, computed } from 'vue';
 import ContextualGuide from '@/components/ContextualGuide.vue';
 import InputField from '@/components/Input-field.vue';
+// OEM: 对话页顶部工具条（Workspace / 模型 / 召回参数）
 import { createSessions } from "@/api/chat/index";
-import { pickHostProjectDir } from '@/utils/desktopProjectDir';
+import { useProjectStore } from '@/stores/project';
+import type { Project } from '@/api/project';
+import { pickHostProjectDir, revokeHostProjectDir } from '@/utils/desktopProjectDir';
 import { projectDirBasename, shouldRenderHostProjectSettings, withOptionalProjectDir } from '@/utils/hostWorkspace';
 import { getSuggestedQuestions } from "@/api/agent/index";
 import type { SuggestedQuestion } from "@/api/agent/index";
@@ -106,10 +125,26 @@ const { t } = useI18n();
 const { navigateToKnowledgeBaseList } = useKnowledgeBaseCreationNavigation();
 
 const hostSandboxEnabled = computed(() =>
-    shouldRenderHostProjectSettings(deploymentCapabilities.isSupported('settings.sandbox.host')),
+    // 项目归属看的是「有没有原生目录选择器」，不是本机沙箱：
+    // Windows 版没有沙箱后端，但项目 / 项目文件 / 会话归属照常可用。
+    shouldRenderHostProjectSettings(deploymentCapabilities.isSupported('settings.projectdir')),
 );
 const selectedProjectDir = ref('');
+const projectStore = useProjectStore();
+// 用户在本页显式选过的项目；为空时回落到默认项目，
+// 所以「不选」也有归属，不会出现无项目的会话。
+// 会话归属的项目由 URL 决定，而不是页内下拉：
+// 从侧栏项目节点点「新建会话」会带 ?project=<id>，这里是它唯一的来源。
+// 没有任何回落 —— 不传项目就不让发，避免会话在用户不知情下落进默认项目。
+const pickedProjectId = ref('');
+const activeProject = computed(
+    () => projectStore.projects.find((p) => p.id === pickedProjectId.value) ?? null,
+);
+const activeProjectId = computed(() => activeProject.value?.id ?? '');
+// 项目列表加载完成前不显示「请先选择项目」，否则会先闪一下错误提示
+const projectsReady = ref(false);
 const pickingProjectDir = ref(false);
+const revokingProjectDir = ref(false);
 
 const showChatContextualGuide = computed(() => {
     return route.name === 'globalCreatChat' || route.name === 'kbCreatChat';
@@ -230,10 +265,62 @@ watch(
 );
 
 onMounted(() => {
+    void initProjects();
     fetchSuggestedQuestions();
 });
 
+/**
+ * 拉项目列表，并识别从侧栏/项目页带过来的 `?project=<id>`。
+ *
+ * 项目 id 是会话归属的唯一来源。query 里的 id 可能已不存在（刚被删）或
+ * 是伪造的，这两种情况都不回落默认项目，而是保持「未选项目」状态，
+ * 由 UI 提示用户回侧栏重新选择。
+ */
+async function initProjects() {
+    try {
+        await projectStore.fetchProjects();
+    } finally {
+        projectsReady.value = true;
+    }
+    const wanted = typeof route.query.project === 'string' ? route.query.project : '';
+    if (!wanted) return;
+    const project = projectStore.projects.find((p) => p.id === wanted);
+    if (!project) return;
+    pickedProjectId.value = project.id;
+    selectedProjectDir.value = project.host_dir;
+}
+
 const inputFieldRef = ref();
+
+/**
+ * 未选项目时，用户直接在新会话页点选一个已有项目。
+ *
+ * 只是把选中的项目记到本页状态，并把 ?project= 同步进 URL——这样刷新页面
+ * 或从别处返回时仍然知道自己选的是哪个项目，行为与从侧栏带进来完全一致。
+ */
+function pickProject(project: Project) {
+    pickedProjectId.value = project.id;
+    selectedProjectDir.value = project.host_dir;
+    void router.replace({ path: route.path, query: { ...route.query, project: project.id } });
+}
+
+/** 一个项目都没有时，走系统目录选择框建第一个项目，建好直接选中。 */
+async function createProjectThenStart() {
+    try {
+        const created = await projectStore.createFromPicker();
+        if (!created) return; // 用户取消选择，不是错误
+        pickProject(created);
+        expandedProjectRefresh();
+    } catch (err) {
+        console.error('[createChat] 创建项目失败', err);
+        MessagePlugin.error(t('project.createFailed'));
+    }
+}
+
+/** 新项目建好后通知侧栏刷新，否则左侧要刷新页面才看得到。 */
+function expandedProjectRefresh() {
+    void projectStore.fetchProjects(true);
+}
 
 // The suggestion's source rides with this send to the new session's first
 // request, so the agent searches it before answering.
@@ -262,8 +349,20 @@ async function createNewSession(value: string, modelId: string, mentionedItems: 
         allowed_tools: settingsStore.agentConfig.allowedTools
     };
 
+    // 没有项目就不建会话：会话必须明确归属到某个项目的目录，
+    // 否则不同工作目录的上下文会混在一起。后端同样会拒绝（400），
+    // 这里前置拦截是为了不让用户白等一次请求失败。
+    if (!activeProjectId.value) {
+        MessagePlugin.warning(t('project.pickFirst'));
+        return;
+    }
+
     try {
-        const res = await createSessions(withOptionalProjectDir(sessionData, selectedProjectDir.value));
+        // project_id 显式传，让会话在侧栏立刻落到正确的项目节点下，
+        // 而不是等下一次列表刷新才归位。目录跟随项目，避免两者不一致。
+        const sessionPayload = withOptionalProjectDir(sessionData, selectedProjectDir.value);
+        (sessionPayload as any).project_id = activeProjectId.value;
+        const res = await createSessions(sessionPayload);
         if (res.data && res.data.id) {
             await navigateToSession(res.data.id, value, modelId, mentionedItems, imageFiles, attachmentFiles, options);
         } else {
@@ -285,7 +384,11 @@ const navigateToSession = async (sessionId: string, value: string, modelId: stri
         isMore: false,
         isNoTitle: true,
         created_at: now,
-        updated_at: now
+        updated_at: now,
+        // 必须带 project_id：侧栏按它把会话挂到对应项目节点下。
+        // 漏掉这个字段时新会话会掉进「未归属项目」的历史分组，
+        // 用户在项目里找不到刚建的对话。
+        project_id: activeProjectId.value,
     };
     usemenuStore.updataMenuChildren(obj);
     usemenuStore.changeIsFirstSession(true);
@@ -295,23 +398,6 @@ const navigateToSession = async (sessionId: string, value: string, modelId: stri
 
 const handleKBEditorSuccess = (kbId: string) => {
     navigateToKnowledgeBaseList(kbId)
-}
-
-function clearProjectDir() {
-    selectedProjectDir.value = '';
-}
-
-async function openProjectDir() {
-    if (pickingProjectDir.value) return;
-    pickingProjectDir.value = true;
-    try {
-        const picked = await pickHostProjectDir();
-        if (picked) selectedProjectDir.value = picked;
-    } catch (e: any) {
-        MessagePlugin.error(e?.message || t('createChat.pickFailed'));
-    } finally {
-        pickingProjectDir.value = false;
-    }
 }
 
 </script>
@@ -324,12 +410,14 @@ async function openProjectDir() {
     // position: relative;
 }
 
+// 收窄到 680px，与有消息的会话页（chat/index.vue 的 .msg_list / .input-container）
+// 保持同一列宽，避免新建页输入框比会话页更宽、切换时横向跳动。
 .dialogue-answers {
     display: flex;
     flex-flow: column;
     align-items: center;
     width: 100%;
-    max-width: 960px;
+    max-width: 680px;
     gap: 24px;
 
     :deep(.answers-input) {
@@ -346,39 +434,30 @@ async function openProjectDir() {
     width: 100%;
 }
 
+/*
+ * 项目标识条：只是「这个会话属于哪个项目」的只读提示，不是切换控件。
+ * 已选项目时常驻显示项目名（鼠标悬停可看完整目录）；
+ * 未选项目时提示去哪选，并且此时不允许发送。
+ */
 .project-dir-bar {
-    display: flex;
-    align-items: center;
-    gap: 4px;
-    width: 100%;
-    max-width: 960px;
-    padding: 0;
-    box-sizing: border-box;
-}
-
-.project-dir-bar__btn {
     display: inline-flex;
     align-items: center;
     gap: 6px;
+    align-self: flex-start;
     max-width: 100%;
-    height: 28px;
-    padding: 0 10px;
-    border: 0.5px solid var(--td-component-border);
-    border-radius: var(--app-radius-md);
-    background: var(--td-bg-color-container);
+    padding: 0 2px;
     color: var(--td-text-color-secondary);
     font-size: var(--app-text-sm);
-    cursor: pointer;
+    box-sizing: border-box;
+
+    &.is-empty {
+        color: var(--td-text-color-placeholder);
+    }
 }
 
-.project-dir-bar__btn.is-bound {
-    color: var(--td-text-color-primary);
-}
-
-.project-dir-bar__btn.is-picking,
-.project-dir-bar__btn:disabled {
-    cursor: default;
-    opacity: 0.75;
+.project-dir-bar__icon {
+    flex: 0 0 auto;
+    color: var(--td-text-color-placeholder);
 }
 
 .project-dir-bar__name {
@@ -386,27 +465,119 @@ async function openProjectDir() {
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+    color: var(--td-text-color-primary);
+    font-weight: 500;
 }
 
-.project-dir-bar__clear {
-    flex: 0 0 auto;
-    border: none;
-    background: transparent;
-    padding: 0 4px;
+.project-dir-bar__hint {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+/*
+ * 未选项目时的可选项目列表。
+ * 之前这里只有一行灰字提示，而真正的入口是侧栏项目行的悬停 + 图标，
+ * 用户找不到，以为「无法新建对话」。现在把项目直接铺在输入框上方，
+ * 点一下就用该项目开始对话，路径最短。
+ */
+.project-picker {
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    width: 100%;
+    padding: 10px 12px;
+    border: 1px solid var(--td-component-stroke);
+    border-radius: var(--app-radius-md, 6px);
+    background: var(--td-bg-color-container);
+    box-sizing: border-box;
+}
+
+.project-picker__hint {
+    margin: 0;
+    font-size: var(--app-text-sm);
     color: var(--td-text-color-placeholder);
-    font-size: var(--app-text-base);
-    line-height: 1;
+}
+
+.project-picker__list {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 8px;
+}
+
+.project-picker__item {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    max-width: 100%;
+    padding: 5px 10px;
+    border: 1px solid var(--td-component-stroke);
+    border-radius: var(--app-radius-md, 6px);
+    background: var(--td-bg-color-container);
+    color: var(--td-text-color-primary);
+    font-size: var(--app-text-sm);
     cursor: pointer;
+    transition: background 0.12s ease, border-color 0.12s ease;
+
+    &:hover {
+        background: var(--td-bg-color-secondarycontainer-hover);
+        border-color: var(--td-brand-color);
+    }
+}
+
+.project-picker__name {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.project-picker__badge {
+    flex: 0 0 auto;
+    padding: 0 4px;
+    border-radius: 3px;
+    background: var(--td-brand-color-light);
+    color: var(--td-brand-color);
+    font-size: 11px;
+    line-height: 16px;
+}
+
+.project-picker__create {
+    align-self: flex-start;
+    padding: 5px 12px;
+    border: 1px dashed var(--td-component-stroke);
+    border-radius: var(--app-radius-md, 6px);
+    background: transparent;
+    color: var(--td-brand-color);
+    font-size: var(--app-text-sm);
+    cursor: pointer;
+
+    &:hover {
+        border-color: var(--td-brand-color);
+        background: var(--td-bg-color-secondarycontainer-hover);
+    }
 }
 
 .dialogue-title {
     display: flex;
     color: var(--td-text-color-primary);
     font-family: var(--app-font-family);
-    font-size: 28px;
+    /*
+     * 字号响应式：原来写死 28px，760px 视口下这句欢迎语宽约 680px，
+     * 而内容区只有 540px —— flex 容器不会自动缩字，文字直接顶出右边界
+     * 被裁掉（表现为"整块内容偏右且被截断"）。
+     * 改成 clamp 后随视口收缩，最小 20px，宽屏仍到 28px。
+     */
+    font-size: clamp(20px, 2.4vw, 28px);
+    line-height: 1.35;
     font-weight: 600;
     align-items: center;
     margin-bottom: 0;
+    // 允许换行：窄屏下宁可折成两行，也不要溢出被裁
+    flex-wrap: wrap;
+    min-width: 0;
+    overflow-wrap: anywhere;
 
     .icon {
         display: flex;
@@ -439,13 +610,24 @@ async function openProjectDir() {
 }
 
 .suggested-questions-container {
-    max-width: 960px;
+    /*
+     * 窄屏修复：父级 .dialogue-answers 设了 align-items:center，本元素又只给了
+     * max-width，于是宽度由「内容」而不是「可用空间」决定 —— 内容需要 572px 时
+     * 它就长到 572px，超出 540px 的容器后居中溢出，右侧被裁、左侧留白，
+     * 表现为整块对话内容"偏移且截断"（760px 视口实测）。
+     * 加 width:100% + min-width:0 后，它按可用宽度收缩，再由内部网格降列。
+     */
+    width: 100%;
+    min-width: 0;
+    max-width: 680px;
+    box-sizing: border-box;
     margin: 0;
     padding: 0 16px;
     transition: height 0.35s @suggested-ease;
 }
 
 .suggested-questions-inner {
+    min-width: 0;
     animation: skeletonFadeIn 0.3s ease-out;
 }
 

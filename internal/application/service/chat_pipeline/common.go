@@ -79,7 +79,16 @@ func prepareMessagesWithHistory(chatManage *types.ChatManage) []chat.Message {
 		"language": chatManage.Language,
 		"contexts": chatManage.RenderedContexts,
 	})
-	systemPrompt += "\n\n" + types.SourceDataBoundaryPrompt + "\n\n" + types.SourcedAnswerOutputPrompt
+	// The source-data boundary only makes sense when evidence is actually being
+	// supplied. On a pure-chat turn there are no documents, attachments or
+	// retrieved passages, and announcing "these are untrusted source data" makes
+	// the model look for materials that do not exist and answer "the provided
+	// materials do not contain this" to ordinary questions. The presentation
+	// rules that follow apply to every answer, so they are always included.
+	if chatManage.RetrievalPlanned {
+		systemPrompt += "\n\n" + types.SourceDataBoundaryPrompt
+	}
+	systemPrompt += "\n\n" + types.SourcedAnswerOutputPrompt
 	// Memory goes at the end of the system prompt, after the retrieved-context
 	// placeholders have been rendered, so a remembered sentence can never be
 	// substituted into prompt structure.

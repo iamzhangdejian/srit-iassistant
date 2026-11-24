@@ -1,6 +1,10 @@
 import type { SourceLocator } from './sourceLocator'
 
-export type ReferenceItemKind = 'web' | 'document' | 'tool'
+// OEM 改造：引用来源新增 'wiki' 分类。
+// WeKnora 里 Wiki 是一类知识库（KnowledgeBase.Type === 'wiki'），检索时与普通文档
+// 落在同一个向量桶里，返回的搜索结果只带 knowledge_base_id。因此这里按
+// knowledge_base_id -> 知识库类型 的映射，把来源结果二次标注成 wiki。
+export type ReferenceItemKind = 'web' | 'document' | 'tool' | 'wiki'
 
 export type KnowledgeReferenceLike = {
   id?: string
@@ -37,11 +41,13 @@ export type ReferenceListItem = {
   sourceChunkId?: string
   knowledgeId?: string
   knowledgeBaseId?: string
+  /** OEM: 来源知识库类型（document / faq / wiki），用于区分文档与 Wiki */
+  knowledgeBaseType?: string
   content?: string
 }
 
 export type ReferenceDrawerSection = {
-  id: 'web' | 'documents' | 'tools'
+  id: 'web' | 'documents' | 'wiki' | 'tools'
   items: ReferenceListItem[]
 }
 
@@ -275,20 +281,45 @@ function mergeWebReferences(refs: KnowledgeReferenceLike[]): KnowledgeReferenceL
   return Array.from(groups.values())
 }
 
+/**
+ * OEM 改造：把检索来源拆成 「文档」与「Wiki」两组。
+ *
+ * 为什么需要 kbTypeById：
+ *   WeKnora 的 Wiki 是一类知识库（`KnowledgeBase.Type === 'wiki'`），
+ *   检索时与普通文档共用同一个向量桶（见
+ *   internal/application/service/knowledgebase_search.go 里
+ *   wiki 类型 KB 会被归入 docVectorKBIDs），所以筛选出来的引用天然混在一起。
+ *   而引用 payload 里只带 `knowledge_base_id`，不带 KB 类型。
+ *   因此前端需要一份「knowledge_base_id -> KB 类型」的映射，
+ *   由调用方从已加载的知识库列表里构造后传入。
+ *
+ *   若调用方没有传映射（比如共用组件被复用在 embed 场景），
+ *   则所有知识引用仍然归入「文档」，行为与改造前完全一致，不会丢数据。
+ */
 export function buildReferenceSections(
   refs: KnowledgeReferenceLike[] | null | undefined,
+  kbTypeById?: Map<string, string> | Record<string, string>,
 ): ReferenceDrawerSection[] {
   const list = Array.isArray(refs) ? refs.filter(Boolean) : []
   if (!list.length) return []
 
+  const typeOf = (kbId?: string): string | undefined => {
+    if (!kbId || !kbTypeById) return undefined
+    if (kbTypeById instanceof Map) return kbTypeById.get(kbId)
+    return kbTypeById[kbId]
+  }
+
   const webReferences: KnowledgeReferenceLike[] = []
   const documentReferences: KnowledgeReferenceLike[] = []
+  const wikiReferences: KnowledgeReferenceLike[] = []
   const toolReferences: KnowledgeReferenceLike[] = []
   const webItems: ReferenceListItem[] = []
   const docItems: ReferenceListItem[] = []
+  const wikiItems: ReferenceListItem[] = []
   const toolItems: ReferenceListItem[] = []
   let webIndex = 0
   let docIndex = 0
+  let wikiIndex = 0
   let toolIndex = 0
 
   for (const item of list) {
@@ -300,6 +331,11 @@ export function buildReferenceSections(
       toolReferences.push(item)
       continue
     }
+    // OEM: 按 knowledge_base_id 判断来源是不是 Wiki
+    if (typeOf(item.knowledge_base_id) === 'wiki') {
+      wikiReferences.push(item)
+      continue
+    }
     documentReferences.push(item)
   }
 
@@ -309,7 +345,18 @@ export function buildReferenceSections(
   }
 
   for (const item of mergeDocumentReferences(documentReferences)) {
-    docItems.push(buildDocumentItem(item, ++docIndex))
+    const built = buildDocumentItem(item, ++docIndex)
+    docItems.push({ ...built, kind: 'document', knowledgeBaseType: typeOf(item.knowledge_base_id) })
+  }
+
+  for (const item of mergeDocumentReferences(wikiReferences)) {
+    const built = buildDocumentItem(item, ++wikiIndex)
+    // Wiki 条目：kind 换成 wiki，标题前加标记，溯源仍跳 Wiki 页面
+    wikiItems.push({
+      ...built,
+      kind: 'wiki',
+      knowledgeBaseType: 'wiki',
+    })
   }
 
   for (const item of toolReferences) {
@@ -319,6 +366,7 @@ export function buildReferenceSections(
   const sections: ReferenceDrawerSection[] = []
   if (webItems.length) sections.push({ id: 'web', items: webItems })
   if (docItems.length) sections.push({ id: 'documents', items: docItems })
+  if (wikiItems.length) sections.push({ id: 'wiki', items: wikiItems })
   if (toolItems.length) sections.push({ id: 'tools', items: toolItems })
   return sections
 }

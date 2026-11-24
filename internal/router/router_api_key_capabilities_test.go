@@ -13,6 +13,11 @@ import (
 
 func TestConversationRoutesDeclareChatCapability(t *testing.T) {
 	gin.SetMode(gin.TestMode)
+	// OEM: agent-chat 由 FeatCutAgentChat 控制（与 FeatCutAgents 解耦）。
+	// 裁剪期间路由不注册，能力断言无从谈起，跳过；放开后照常校验。
+	if FeatCutAgentChat {
+		t.Skip("agent-chat route is cut by FeatCutAgentChat")
+	}
 	g := &rbacGuards{}
 	v1 := gin.New().Group("/api/v1")
 
@@ -484,6 +489,11 @@ func TestSkillCatalogWriteRoutesRequireFullAccess(t *testing.T) {
 
 func TestTenantMemberRoutesDeclareManageMembersCapability(t *testing.T) {
 	gin.SetMode(gin.TestMode)
+	// OEM: 组织 / 成员 / 邀请由 FeatCutOrganization 主动裁剪，路由不注册，
+	// 能力断言无从谈起，裁剪期间跳过。
+	if FeatCutOrganization {
+		t.Skip("tenant member routes are cut by FeatCutOrganization")
+	}
 	g := &rbacGuards{}
 	v1 := gin.New().Group("/api/v1")
 

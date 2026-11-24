@@ -23,12 +23,21 @@ conversation:
   generate_summary_prompt_id: "default_summary"  # from prompt_templates/generate_summary.yaml
   generate_kb_description_prompt_id: "default_kb_description"  # from prompt_templates/generate_kb_description.yaml
   generate_session_title_prompt_id: "default_session_title"  # from prompt_templates/generate_session_title.yaml
+  # 对话主回答的输出上限（token）。
+  # 与下面 summary.max_completion_tokens 是两个不同的东西：
+  #   - 这里是聊天里生成的主回答，需要足够大才能写完一篇完整报告；
+  #   - summary 那一项是后台摘要/画像用的紧凑预算，保持小值才能让入库快。
+  # 16384 约合一万两千字。运行期可在「系统设置 → 运行与并发 → 对话最大回答长度」
+  # 里实时调整，改完下一次对话就生效，不需要重启、也不需要重新打包。
+  max_answer_tokens: 16384
   summary:
     # Document profiles need the head of the document, not the whole body:
     # 8k characters is enough to name the topic, the type and one question.
     max_input_chars: 8192
     repeat_penalty: 1.0
     temperature: 0.3
+    # 后台文档摘要/画像的输出预算。不要跟着 max_answer_tokens 一起调大，
+    # 那会让每次入库的摘要生成变慢。它同时被评测和知识处理复用。
     max_completion_tokens: 1024
     no_match_prefix: |-
       <think>
@@ -113,4 +122,14 @@ extract:
 # Tenant configuration
 tenant:
   # Enable cross-tenant access (can be enabled for intranet environments)
-  enable_cross_tenant_access: false
+  #
+  # OEM 单独开启：Workspace 下拉（TenantSelector）依赖跨空间接口
+  # GET /api/v1/tenants/search 与 /tenants/all，这两个路由挂了
+  # middleware.RequireCrossTenantAccess（internal/middleware/access.go:105）。
+  # 该中间件要求两个条件同时满足：
+  #   1) 集群开关 enable_cross_tenant_access = true（本行）
+  #   2) 用户对象上的 CanAccessAllTenants = true（仅系统的超级管理员具备）
+  # 只开集群开关不会让普通成员看到/切到别的空间，权限边界仍由 2) 兜底。
+  # 若关闭此项，前端点击 Workspace 下拉会报
+  # "Cross-workspace access is disabled"。
+  enable_cross_tenant_access: true

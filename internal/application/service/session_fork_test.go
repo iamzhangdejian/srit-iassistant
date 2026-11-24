@@ -1199,7 +1199,9 @@ func TestForkOnHostDoesNotDegradeWhenPrecedingTurnHasNoCheckpoint(t *testing.T) 
 	require.Equal(t, []string{"u-msg-1", "a-msg-1"}, sessions.copiedFromIDs())
 }
 
-// A branch of a project session keeps operating on the same project.
+// A branch of a project session keeps operating on the same project, and it
+// must stay listed under that project — a branch without project_id showed up
+// in 「未归属项目的会话」 while its files panel still read the same directory.
 func TestForkInheritsHostWorkspaceDir(t *testing.T) {
 	turn := checkpointedTurn("u-msg-1", "a-msg-1", "sbx-1", "sha1", 0)
 	forkPoint := &types.Message{
@@ -1208,12 +1210,32 @@ func TestForkInheritsHostWorkspaceDir(t *testing.T) {
 	port := &fakeForkSandboxPort{boundID: "sbx-1", bound: true, snapshotID: "snap-1"}
 	svc, sessions, _ := newForkFixture(t, port, append(turn, forkPoint))
 	sessions.source.HostWorkspaceDir = "/Users/dev/My Project"
+	sessions.source.ProjectID = "proj-1"
 
 	_, err := svc.Fork(context.Background(), 1, "u1", "src", "u-msg-2", "")
 
 	require.NoError(t, err)
 	require.NotNil(t, sessions.created)
 	require.Equal(t, "/Users/dev/My Project", sessions.created.HostWorkspaceDir)
+	require.Equal(t, "proj-1", sessions.created.ProjectID)
+}
+
+// A session outside any project (legacy rows) branches without inventing one.
+func TestForkWithoutProjectStaysUnassigned(t *testing.T) {
+	turn := checkpointedTurn("u-msg-1", "a-msg-1", "sbx-1", "sha1", 0)
+	forkPoint := &types.Message{
+		ID: "u-msg-2", SessionID: "src", Role: "user", CreatedAt: forkBase.Add(10 * time.Second),
+	}
+	port := &fakeForkSandboxPort{boundID: "sbx-1", bound: true, snapshotID: "snap-1"}
+	svc, sessions, _ := newForkFixture(t, port, append(turn, forkPoint))
+	sessions.source.HostWorkspaceDir = ""
+	sessions.source.ProjectID = ""
+
+	_, err := svc.Fork(context.Background(), 1, "u1", "src", "u-msg-2", "")
+
+	require.NoError(t, err)
+	require.NotNil(t, sessions.created)
+	require.Empty(t, sessions.created.ProjectID)
 }
 
 type forkMarkerKey struct{}

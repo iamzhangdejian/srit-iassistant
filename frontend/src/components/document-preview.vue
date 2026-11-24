@@ -20,6 +20,7 @@ import {
 } from '@/utils/markdownPreviewImages';
 import { buildHtmlPreview } from '@/utils/htmlPreview';
 import MermaidFilePreview from './mermaid-file/MermaidFilePreview.vue';
+import { convertLegacyDocument } from '@/api/documentConvert';
 import {
   FILE_PREVIEW_SNIFF_BYTES,
   getHighlightLang as resolveHighlightLang,
@@ -50,6 +51,7 @@ import { renderEpubPreview } from '@/utils/epubPreview';
 
 const VueOfficePptx = defineAsyncComponent(() => import('@vue-office/pptx'));
 const PdfSourceViewer = defineAsyncComponent(() => import('@/components/source-preview/PdfSourceViewer.vue'));
+import type { PdfRangeSource } from '@/components/source-preview/PdfSourceViewer.vue';
 
 const { t } = useI18n();
 
@@ -73,6 +75,11 @@ const props = defineProps<{
   sourceMode?: boolean;
   /** Where to scroll and what to highlight once the file is rendered. */
   locate?: SourceLocateRequest | null;
+  /**
+   * 超大 PDF 的 Range 分段来源（大文件预览）。给了它就不需要 `sourceBlob`，
+   * pdf.js 会按需向后端要字节区间，不把整份文件读进内存。
+   */
+  pdfRange?: PdfRangeSource | null;
 }>();
 
 export type SourceLocateResult = { found: boolean; precise: boolean; granularity?: string; reason?: string };
@@ -92,6 +99,8 @@ onErrorCaptured((err) => {
   return false;
 });
 const previewType = ref<FilePreviewKind>('unsupported');
+// 旧版 Office（.doc/.ppt）经后端 anydoc 转成 Markdown 再走 markdown 渲染。
+const legacyConverted = ref(false);
 const blobUrl = ref('');
 const textContent = ref('');
 const highlightedCode = ref('');
@@ -298,6 +307,27 @@ function decodeCSVBlob(arrayBuffer: ArrayBuffer): string {
   return new TextDecoder('gbk').decode(bytes);
 }
 
+/**
+ * sheet_to_html() wraps its output in a full HTML document whose <title> is
+ * "SheetJS Table Export". Injecting that as a fragment makes the sanitizer
+ * keep the title text, so every workbook showed a stray "SheetJS Table Export"
+ * line above the first table. Keep only the <table> element.
+ */
+function sheetTableHtml(XLSX: any, sheet: any, id: string): string {
+  const raw = XLSX.utils.sheet_to_html(sheet, { id });
+  const doc = new DOMParser().parseFromString(raw, 'text/html');
+  const table = doc.querySelector('table');
+  return table ? table.outerHTML : '';
+}
+
+function escapeHtml(value: string): string {
+  return value
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
 async function renderExcel(blob: Blob, fileType?: string) {
   const XLSX = await import('xlsx');
   const arrayBuffer = await blob.arrayBuffer();
@@ -318,12 +348,11 @@ async function renderExcel(blob: Blob, fileType?: string) {
   let html = '';
   workbook.SheetNames.forEach((name, sheetIdx) => {
     const sheet = workbook.Sheets[name];
-    const sheetHtml = XLSX.utils.sheet_to_html(sheet, { id: `sheet-${sheetIdx}` });
     html += `<div class="excel-sheet">`;
     if (workbook.SheetNames.length > 1) {
-      html += `<div class="excel-sheet-name">${name}</div>`;
+      html += `<div class="excel-sheet-name">${escapeHtml(name)}</div>`;
     }
-    html += sheetHtml;
+    html += sheetTableHtml(XLSX, sheet, `sheet-${sheetIdx}`);
     html += `</div>`;
   });
   excelHtml.value = sanitizeHTML(html);
@@ -420,6 +449,9 @@ function onImageLoad(e: Event) {
 }
 
 function getPreviewSourceKey(): string {
+  if (props.pdfRange) {
+    return `resource-range:${props.fileName}:${props.fileType}:${props.pdfRange.totalBytes}`;
+  }
   if (props.sourceBlob) {
     return `resource-blob:${props.fileName}:${props.fileType}:${props.sourceBlob.size}:${props.sourceBlob.type}`;
   }
@@ -483,6 +515,14 @@ async function loadPreview() {
   previewType.value = resolvePreviewKind(ft);
 
   try {
+    // Range 模式的 PDF 不需要整份字节：直接交给 pdf.js 按需拉取。
+    if (props.pdfRange && resolvePreviewKind(ft) === 'pdf') {
+      previewType.value = 'pdf';
+      loading.value = false;
+      await nextTick();
+      previewExt = ft;
+      return;
+    }
     const rawBlob = await fetchPreviewBlob();
     let kind = resolvePreviewKind(ft);
     if (kind === 'unsupported') {
@@ -507,11 +547,11 @@ async function loadPreview() {
     previewExt = ft;
     switch (kind) {
       case 'pdf': {
-        if (props.sourceMode) {
-          pdfData.value = await blob.arrayBuffer();
-        } else {
-          blobUrl.value = URL.createObjectURL(blob);
-        }
+        // Always render with pdf.js instead of the WebView's built-in PDF
+        // plugin. macOS WKWebView (the desktop shell) does not paint a PDF in
+        // a sub-frame, so `<iframe src="blob:...">` came up blank for every
+        // artifact and attachment while markdown (plain DOM) worked.
+        pdfData.value = await blob.arrayBuffer();
         break;
       }
       case 'image':
@@ -550,6 +590,19 @@ async function loadPreview() {
         await renderMarkdown(blob);
         // Markdown 里的 resource:// 等受保护图片需要带鉴权换 blob（无 override
         // 时走应用默认鉴权面：登录态 /files 代理）。已换过的元素幂等跳过。
+        await nextTick();
+        await hydrateProtectedFileImages(previewContent.value);
+        break;
+      }
+      case 'legacy': {
+        // Word 97-2003 / PowerPoint 97-2003 are OLE2 binaries that the
+        // client-side docx/pptx renderers cannot read, so the backend
+        // converts them to Markdown. Rendering then reuses the markdown path,
+        // including image hydration and citation locating.
+        const converted = await convertLegacyDocument(blob, props.fileName || `document.${ft || 'doc'}`);
+        if (getPreviewSourceKey() !== sourceKey || !props.active) return;
+        legacyConverted.value = true;
+        await renderMarkdown(new Blob([converted.markdown], { type: 'text/markdown;charset=utf-8' }));
         await nextTick();
         await hydrateProtectedFileImages(previewContent.value);
         break;
@@ -593,6 +646,7 @@ function cleanup() {
   excelHtml.value = '';
   mermaidSource.value = null;
   loadedMermaidBlob = undefined;
+  legacyConverted.value = false;
   htmlViewMode.value = 'render';
   pptxData.value = null;
   pdfData.value = null;
@@ -979,11 +1033,20 @@ onUnmounted(() => {
     </div>
 
     <!-- PDF -->
-    <div v-else-if="previewType === 'pdf' && pdfData" class="preview-pdf preview-pdf--source">
-      <PdfSourceViewer :data="pdfData" :file-name="fileName" :locate="locate" @located="(r) => emit('located', r)" />
+    <div v-else-if="previewType === 'pdf' && (pdfData || pdfRange)" class="preview-pdf preview-pdf--source">
+      <PdfSourceViewer
+        :data="pdfData"
+        :range-source="pdfRange || null"
+        :file-name="fileName"
+        :locate="locate"
+        @located="(r) => emit('located', r)"
+        @error="(message) => (error = message)"
+      />
     </div>
-    <div v-else-if="previewType === 'pdf' && blobUrl" class="preview-pdf">
-      <iframe ref="previewContent" tabindex="0" :title="fileName" :src="blobUrl" class="pdf-iframe" @load="onPreviewFrameLoad" />
+    <div v-else-if="previewType === 'pdf'" class="preview-pdf preview-pdf--source">
+      <div class="preview-pdf-placeholder">
+        <t-loading size="small" />
+      </div>
     </div>
 
     <!-- HTML: artifacts render in a unique-origin iframe; other sources stay as source. -->
@@ -1039,6 +1102,12 @@ onUnmounted(() => {
     <!-- EPUB -->
     <div v-else-if="previewType === 'epub' && epubHtml" ref="previewContent" tabindex="0" :aria-label="fileName" class="preview-markdown preview-epub">
       <div class="markdown-body" v-html="epubHtml" />
+    </div>
+
+    <!-- 旧版 Office（.doc/.ppt）：后端转 Markdown 后预览 -->
+    <div v-else-if="previewType === 'legacy' && markdownHtml" ref="previewContent" tabindex="0" :aria-label="fileName" class="preview-markdown preview-legacy">
+      <p class="preview-legacy__notice">{{ $t('preview.legacyConverted') }}</p>
+      <div class="markdown-body" v-html="markdownHtml" />
     </div>
 
     <!-- Markdown -->
@@ -1112,6 +1181,12 @@ onUnmounted(() => {
   overflow: auto;
   max-height: @preview-max-h;
   background: @bg-white;
+  // These containers are focused programmatically so keyboard scrolling works.
+  // The UA draws a blue "keyboard" ring on that focus, which reads as a broken
+  // border in the preview; they are scroll surfaces, not controls.
+  &:focus {
+    outline: none;
+  }
 }
 
 .document-preview {
@@ -1313,15 +1388,18 @@ onUnmounted(() => {
 }
 
 // ── PDF ──
+// Rendered by pdf.js (PdfSourceViewer) rather than the browser's PDF plugin,
+// which the macOS desktop shell (WKWebView) does not paint inside a sub-frame.
 .preview-pdf {
   width: 100%;
   height: @preview-max-h;
   min-height: 500px;
-  .pdf-iframe {
+  .preview-pdf-placeholder {
+    display: flex;
+    align-items: center;
+    justify-content: center;
     width: 100%;
     height: 100%;
-    border: none;
-    border-radius: @border-radius;
   }
 }
 
@@ -1408,9 +1486,31 @@ onUnmounted(() => {
   padding: 20px 24px;
 }
 
+// 旧版 Office 转换预览：顶部一条说明，提示版式被简化过。
+.preview-legacy {
+  .preview-legacy__notice {
+    margin: 0 0 12px;
+    padding: 6px 10px;
+    border-radius: var(--td-radius-default, 6px);
+    background: var(--td-bg-color-container-hover, #f3f3f3);
+    color: var(--td-text-color-secondary);
+    font-size: var(--app-text-xs, 12px);
+    line-height: 1.5;
+  }
+}
+
 // ── DOCX ──
 .preview-docx {
-  .docx-container { .preview-container(); }
+  .docx-container {
+    .preview-container();
+
+    // docx-preview 用 Symbol 字体的私有区字符（U+F0B7）画项目符号，macOS 与
+    // 无 Office 字体的环境里该字形缺失，渲染成方块。统一换成一个圆点。
+    :deep(p[class*='listbullet'])::before {
+      content: '•\9' !important;
+      font-family: inherit !important;
+    }
+  }
 }
 
 // ── PPTX ──

@@ -25,6 +25,11 @@ type Handler struct {
 	messageService       interfaces.MessageService // Service for managing messages
 	suggestionService    interfaces.MessageSuggestionService
 	sessionService       interfaces.SessionService       // Service for managing sessions
+	// projectService resolves which project a new session belongs to and, via
+	// that project, which host directory it should run in. Nil in builds that
+	// do not wire projects (e.g. minimal tests): creation then behaves exactly
+	// as before, with no project attached.
+	projectService *service.ProjectService
 	streamManager        interfaces.StreamManager        // Manager for handling streaming responses
 	config               *config.Config                  // Application configuration
 	knowledgebaseService interfaces.KnowledgeBaseService // Service for managing knowledge bases
@@ -119,6 +124,7 @@ func NewHandler(
 	forkService *service.SessionForkService,
 	rewindService *service.SessionRewindService,
 	approvedProjectDirs HostProjectDirsLoader,
+	projectService *service.ProjectService,
 	backgroundWork *service.BackgroundWork,
 	hostModes HostApprovalModes,
 ) *Handler {
@@ -151,6 +157,7 @@ func NewHandler(
 		desktopLast:           desktopLast,
 		redis:                 rdb,
 		approvedProjectDirs:   approvedProjectDirs,
+		projectService:        projectService,
 		background:            backgroundWork,
 		hostModes:             hostModes,
 		attachmentProcessor: NewAttachmentProcessor(
@@ -220,9 +227,46 @@ func (h *Handler) CreateSession(c *gin.Context) {
 		return
 	}
 
+	// Resolve the project this session belongs to. A project binds one local
+	// directory, and the session inherits it: writing the path into
+	// HostWorkspaceDir here means the sandbox keeps reading exactly one column
+	// (sessions.host_workspace_dir) and the authorization chain is unchanged.
+	//
+	// Precedence inside the service: explicit project_id → the project that
+	// already owns ProjectDir. There is deliberately no default fallback: a
+	// session must name its project, otherwise it would be filed under a
+	// directory the user never picked.
+	projectID := ""
+	if h.projectService != nil {
+		project, err := h.projectService.ResolveForSession(
+			ctx, tenantID.(uint64), request.ProjectID, hostDir,
+		)
+		if err != nil {
+			// ErrProjectRequired is a client error (missing selection), not a
+			// server fault; surface it as 400 so the composer can show the
+			// "pick a project first" hint instead of a generic failure.
+			if stderrors.Is(err, types.ErrProjectRequired) {
+				_ = c.Error(errors.NewBadRequestError(types.ErrProjectRequired.Error()))
+				return
+			}
+			_ = c.Error(err)
+			return
+		}
+		if project != nil {
+			projectID = project.ID
+			// The project owns the directory. Trust it over any client-supplied
+			// project_dir: the path was validated when the project was created,
+			// so it is at least as authorised as the picker value.
+			if project.HostDir != "" {
+				hostDir = project.HostDir
+			}
+		}
+	}
+
 	// Create session object with base properties
 	createdSession := &types.Session{
 		TenantID:         tenantID.(uint64),
+		ProjectID:        projectID,
 		Kind:             request.Kind,
 		Title:            request.Title,
 		Description:      types.SanitizeClientSessionDescription(request.Description, ""),

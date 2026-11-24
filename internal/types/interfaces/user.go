@@ -38,8 +38,6 @@ type UserService interface {
 	UpdateUser(ctx context.Context, user *types.User) error
 	// DeleteUser deletes a user
 	DeleteUser(ctx context.Context, id string) error
-	// ChangePassword changes user password
-	ChangePassword(ctx context.Context, userID string, oldPassword, newPassword string) error
 	// AdminResetPassword replaces a user's password without requiring the old
 	// password and revokes all of that user's existing sessions. Callers must
 	// enforce the system-admin and cannot-reset-self guards before invoking it.

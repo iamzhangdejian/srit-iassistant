@@ -43,14 +43,13 @@ test('questionMinimapTrackHeight still caps a long cluster to the centered rail'
   assert.equal(questionMinimapTrackHeight(100, 400), 200)
 })
 
-test('shouldShowQuestionMinimap requires overflow, a turn, and room beside the messages', () => {
-  assert.equal(shouldShowQuestionMinimap(true, 1, 60), true)
-  assert.equal(shouldShowQuestionMinimap(true, 2, 44), true)
-  assert.equal(shouldShowQuestionMinimap(true, 0, 60), false)
-  assert.equal(shouldShowQuestionMinimap(false, 4, 60), false)
-  assert.equal(shouldShowQuestionMinimap(true, 4, 43), false)
-  assert.equal(shouldShowQuestionMinimap(true, 4, 0), false)
-  assert.equal(shouldShowQuestionMinimap(true, 4, -20), false)
+test('shouldShowQuestionMinimap only requires overflow and at least one turn', () => {
+  // 窗口宽窄不再影响可见性：导航是浮层，窄窗口也要能用
+  assert.equal(shouldShowQuestionMinimap(true, 1), true)
+  assert.equal(shouldShowQuestionMinimap(true, 2), true)
+  assert.equal(shouldShowQuestionMinimap(true, 4), true)
+  assert.equal(shouldShowQuestionMinimap(true, 0), false)
+  assert.equal(shouldShowQuestionMinimap(false, 4), false)
 })
 
 test('collectOutlineMessages groups each query and its answers into one turn', () => {

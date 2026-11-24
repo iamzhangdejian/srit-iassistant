@@ -95,9 +95,8 @@ test('matches backend default-tool behavior', () => {
 })
 
 test('resolveAgentNotReadySection opens model config for model issues', () => {
-  assert.equal(resolveAgentNotReadySection(['summary_model']), 'model')
-  assert.equal(resolveAgentNotReadySection(['rerank_model']), 'model')
-  assert.equal(resolveAgentNotReadySection(['summary_model', 'allowed_tools']), 'model')
+  assert.equal(resolveAgentNotReadySection(['chat_model']), 'model')
+  assert.equal(resolveAgentNotReadySection(['chat_model', 'allowed_tools']), 'model')
 })
 
 test('resolveAgentNotReadySection opens tools config when only tools are missing', () => {
@@ -105,7 +104,7 @@ test('resolveAgentNotReadySection opens tools config when only tools are missing
 })
 
 test('resolveAgentNotReadyHighlight returns the first missing item', () => {
-  assert.equal(resolveAgentNotReadyHighlight(['summary_model', 'rerank_model']), 'summary_model')
+  assert.equal(resolveAgentNotReadyHighlight(['chat_model', 'allowed_tools']), 'chat_model')
   assert.equal(resolveAgentNotReadyHighlight(['allowed_tools']), 'allowed_tools')
   assert.equal(resolveAgentNotReadyHighlight([]), undefined)
 })
@@ -115,20 +114,20 @@ test('getAgentNotReadyReasonKeys flags missing chat model', () => {
     {},
     [{ id: 'chat-1', type: 'KnowledgeQA' }],
     { isAgentMode: false, isSharedAgent: false },
-  ), ['summary_model'])
+  ), ['chat_model'])
 })
 
-test('getAgentNotReadyReasonKeys requires rerank only in agent mode with KB search', () => {
-  assert.deepEqual(getAgentNotReadyReasonKeys(
-    { kb_selection_mode: 'all', allowed_tools: ['search_knowledge'] },
-    [{ id: 'chat-1', type: 'KnowledgeQA' }, { id: 'rerank-1', type: 'Rerank' }],
-    { isAgentMode: true, isSharedAgent: false },
-  ), ['summary_model', 'rerank_model'])
-  assert.deepEqual(getAgentNotReadyReasonKeys(
-    { kb_selection_mode: 'all', allowed_tools: ['knowledge_search'] },
-    [{ id: 'chat-1', type: 'KnowledgeQA' }, { id: 'rerank-1', type: 'Rerank' }],
-    { isAgentMode: true, isSharedAgent: false },
-  ), ['summary_model', 'rerank_model'])
+// 快速问答/智能推理都不再因为缺少 rerank 模型被判未就绪：
+// 检索缺省沿用工作区默认的 rerank，未配置时后端直接跳过重排。
+test('getAgentNotReadyReasonKeys never requires a rerank model', () => {
+  const models = [{ id: 'chat-1', type: 'KnowledgeQA' }, { id: 'rerank-1', type: 'Rerank' }]
+  for (const tools of [['search_knowledge'], ['knowledge_search'], undefined]) {
+    assert.deepEqual(getAgentNotReadyReasonKeys(
+      { model_id: 'chat-1', kb_selection_mode: 'all', allowed_tools: tools },
+      models,
+      { isAgentMode: true, isSharedAgent: false },
+    ), [])
+  }
 })
 
 test('getAgentNotReadyReasonKeys does not treat current shared context as shared without sourceTenantId', () => {
@@ -136,7 +135,7 @@ test('getAgentNotReadyReasonKeys does not treat current shared context as shared
     { model_id: 'deleted-chat' },
     [{ id: 'chat-1', type: 'KnowledgeQA' }],
     { isAgentMode: false, isSharedAgent: false },
-  ), ['summary_model'])
+  ), ['chat_model'])
 })
 
 test('getAgentNotReadyReasonKeys treats an empty allowed_tools with a rerank model as ready', () => {

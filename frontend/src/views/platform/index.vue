@@ -1,7 +1,15 @@
 <template>
-    <div class="main" ref="dropzone" :style="{ '--sidebar-width': `${uiStore.sidebarDisplayWidth}px` }">
+    <div class="main" ref="dropzone"
+        :class="{ 'is-sidebar-collapsed': uiStore.sidebarCollapsed }"
+        :style="{ '--sidebar-width': `${uiStore.sidebarDisplayWidth}px` }">
         <Menu></Menu>
-        <div v-if="isRouterAlive" class="platform-route-outlet">
+        <!--
+          OEM 改造：设置页以「内嵌页」形态展示（不是浮层）。
+          打开设置时让路由区让位 —— 用 class 收缩而不是 v-if 销毁，
+          因为路由组件承载着未发送的输入、滚动位置等状态，
+          销毁再重建会丢失，用户体验会断。
+        -->
+        <div v-if="isRouterAlive" class="platform-route-outlet" :class="{ 'platform-route-outlet--hidden': uiStore.showSettingsModal }">
             <RouterView />
         </div>
         <!-- WeKnora 助手：停靠时作为布局右栏挤压页面，悬浮时浮在页面上；都不加遮罩，
@@ -18,8 +26,13 @@
         <GlobalCommandPalette />
         <!-- 知识库文件上传进度浮层：上传队列放在 store 里，切换页面不中断 -->
         <UploadTasksPanel />
-        <!-- 带遮罩层的新手引导：首次进入自动开启，可从用户菜单顶部昵称旁帮助按钮重新打开 -->
-        <NewUserGuide />
+        <!--
+          OEM 改造：新手引导默认关闭。
+          原版首次进入会用遮罩弹窗覆盖对话页（8 步向导），
+          与「首页直接进入对话页面」的产品形态冲突，故不再自动弹出。
+          如需恢复：把下一行的 v-if 去掉即可。
+        -->
+        <NewUserGuide v-if="false" />
     </div>
 </template>
 <script setup lang="ts">
@@ -270,6 +283,19 @@ onUnmounted(() => {
     display: flex;
     flex-direction: column;
     overflow: hidden;
+
+    /*
+     * 设置页占据整块内容区时，路由区收缩到 0 宽但仍保留在 DOM 中。
+     * 用 flex-basis:0 + flex-grow:0 + overflow:hidden 实现"占位归零但不销毁"。
+     */
+    &--hidden {
+        flex: 0 0 0;
+        width: 0;
+        min-width: 0;
+        overflow: hidden;
+        pointer-events: none;
+        visibility: hidden;
+    }
 }
 
 .upload-mask {

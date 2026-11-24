@@ -336,7 +336,9 @@ onBeforeUnmount(() => {
 .question-minimap {
   position: absolute;
   top: 50%;
-  left: var(--chat-content-inset, 20px);
+  /* 锚点导航贴在内容区右侧边缘：和用户从右往左看的阅读习惯一致，
+     也不会撞上左侧的项目导航。inset 取负值往右推，让刻度条压在留白里。 */
+  right: calc(var(--chat-scrollbar-gutter, 0px) + 26px);
   z-index: 11;
   display: flex;
   align-items: stretch;
@@ -354,7 +356,8 @@ onBeforeUnmount(() => {
 
 .question-minimap__rail {
   position: relative;
-  width: 28px;
+  /* 宽度要容得下最长的刻度（当前项 18px），否则会溢出被裁 */
+  width: 20px;
   height: 100%;
   padding: 0;
   overflow: visible;
@@ -381,34 +384,52 @@ onBeforeUnmount(() => {
 
 .question-minimap__tick {
   position: absolute;
-  left: 0;
-  width: 9px;
+  /* 等距短横，右端统一对齐。不画竖线——竖线会和内容边缘抢视觉，
+     留白本身就是最好的导轨。 */
+  right: 0;
+  width: 12px;
   height: 2px;
   border-radius: 1px;
-  background: var(--td-text-color-secondary);
-  opacity: 0.4;
+  background: var(--td-text-color-placeholder);
+  opacity: 0.28;
+  cursor: pointer;
   transform: translateY(-50%);
-  transform-origin: left center;
-  transition: transform var(--app-motion-instant) ease-out, background var(--app-motion-instant) ease-out, opacity var(--app-motion-instant) ease-out;
+  transform-origin: right center;
+  transition: background-color var(--app-motion-instant) ease-out, opacity var(--app-motion-instant) ease-out, width var(--app-motion-instant) ease-out, height var(--app-motion-instant) ease-out;
+
+  /* 热区向外撑开，鼠标不用精确对准 2px 的细线；不影响视觉 */
+  &::before {
+    content: '';
+    position: absolute;
+    inset: -5px -8px;
+  }
 }
 
+/* 悬停预览：只提亮，给出"即将跳到这条"的反馈 */
+.question-minimap__rail:hover .question-minimap__tick--previewed,
 .question-minimap__tick--previewed {
   background: var(--td-text-color-primary);
   opacity: 0.7;
 }
 
+/* 当前视口所在的这一轮：深色 + 加粗。
+   长度已由 JS 的 CURRENT_TICK_SCALE 略微放大，这里不再额外加宽，
+   避免两道放大叠加后长到 28px、显得粗笨。 */
 .question-minimap__tick--active {
-  background: var(--td-brand-color);
-  opacity: 0.85;
+  background: var(--td-text-color-primary);
+  opacity: 1;
+  height: 3px;
 }
 
 .question-minimap__bridge {
   width: 8px;
+  order: -1;
 }
 
 .question-minimap__panel {
   position: absolute;
-  left: 28px;
+  /* 贴在右边缘时，面板必须向左展开，否则会跑出视口 */
+  right: 28px;
   width: 264px;
   max-width: calc(100vw - 80px);
   max-height: min(280px, 40vh);

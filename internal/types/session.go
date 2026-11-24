@@ -95,6 +95,12 @@ type Session struct {
 	Description string `json:"description"`
 	// Workspace ID
 	TenantID uint64 `json:"tenant_id"   gorm:"index"`
+	// ProjectID is the project this session belongs to (工作空间 → 项目 → 会话).
+	// A project binds one local directory, and this session inherits it through
+	// HostWorkspaceDir at creation. Empty means "no project": legacy rows and
+	// API-created sessions that predate the project layer, or sessions whose
+	// project was deleted and whose conversations the user chose to keep.
+	ProjectID string `json:"project_id,omitempty" gorm:"type:varchar(36);index"`
 	// Kind is empty for ordinary chats and SessionKindAssistant for assistant
 	// conversations; it is set at creation and never updated.
 	Kind string `json:"kind" gorm:"column:kind;type:varchar(32);not null;default:''"`

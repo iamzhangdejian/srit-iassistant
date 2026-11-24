@@ -91,6 +91,7 @@ import (
 	"github.com/Tencent/WeKnora/internal/im/yunzhijia"
 	"github.com/Tencent/WeKnora/internal/infrastructure/docparser"
 	infra_web_search "github.com/Tencent/WeKnora/internal/infrastructure/web_search"
+	"github.com/Tencent/WeKnora/internal/licenser"
 	"github.com/Tencent/WeKnora/internal/logger"
 	"github.com/Tencent/WeKnora/internal/mcp"
 	"github.com/Tencent/WeKnora/internal/mcpserver"
@@ -147,6 +148,13 @@ func BuildContainer(container *dig.Container) *dig.Container {
 	// Register goroutine pool cleanup handler
 	must(container.Invoke(registerPoolCleanup))
 
+	// Let the file tools report the paths they write. On the desktop host
+	// backend the workspace is the user's project directory, so the artifact
+	// collector never scans it; it collects exactly these recorded paths
+	// instead. Wiring here (rather than inside tools) keeps the dependency
+	// direction legal: service imports tools, never the reverse.
+	tools.SetTurnWriteObserver(service.NoteTurnWrite)
+
 	// Initialize retrieval engine registry for search capabilities
 	logger.Debugf(ctx, "[Container] Registering retrieval engine registry...")
 	must(container.Provide(initRetrieveEngineRegistry))
@@ -190,6 +198,7 @@ func BuildContainer(container *dig.Container) *dig.Container {
 	must(container.Provide(repository.NewAgentPromptRepository))
 	must(container.Provide(repository.NewAgentGrantRepository))
 	must(container.Provide(repository.NewCredentialVaultRepository))
+	must(container.Provide(repository.NewProjectRepository))
 	must(container.Provide(repository.NewAgentRunSuspensionRepository))
 	must(container.Provide(repository.NewMCPOAuthRepository))
 	must(container.Provide(repository.NewTenantSandboxConfigRepository))
@@ -418,6 +427,9 @@ func BuildContainer(container *dig.Container) *dig.Container {
 
 	logger.Debugf(ctx, "[Container] Registering session service...")
 	must(container.Provide(service.NewSessionService))
+	// ProjectService needs the approved-directory loader, the same one the session
+	// handler uses, so the project boundary and the sandbox boundary cannot drift.
+	must(container.Provide(service.NewProjectService))
 	must(container.Provide(service.NewTenantSkillService))
 	// The member-facing half of env vars is its own service because its
 	// authority is different in kind: it derives the identity from the context
@@ -685,6 +697,7 @@ func BuildContainer(container *dig.Container) *dig.Container {
 
 	// HTTP handlers layer
 	logger.Debugf(ctx, "[Container] Registering HTTP handlers...")
+	must(container.Provide(handler.NewProjectHandler))
 	must(container.Provide(handler.NewTenantHandler))
 	must(container.Provide(handler.NewTenantMemberHandler))
 	must(container.Provide(handler.NewTenantInvitationHandler))
@@ -814,6 +827,19 @@ func BuildContainer(container *dig.Container) *dig.Container {
 	// (which is not encoded in the local:// URL).
 	must(container.Invoke(registerChatLocalImageResolver))
 
+	// 授权服务：以「可选依赖」的方式注册。
+	//
+	// dig 需要一个具体类型可解析，但我们又不想强制所有入口（含
+	// cmd/server、各种测试）都去构造 license.Store——它们没装授权
+	// 就应当是「无限制」。所以这里注册一个返回指针的 provider，
+	// 由各入口通过 SetLicenseService 决定是否注入；RouterParams
+	// 里该字段为 nil 时中间件自动跳过。
+	// 默认值来自 licenseServiceOverride；入口没设置时为 nil，即不启用。
+	must(container.Provide(func() *licenser.Service { return licenseServiceOverride }))
+	must(container.Invoke(func(authHandler *handler.AuthHandler, licenseSvc *licenser.Service) {
+		authHandler.SetLicenseService(licenseSvc)
+	}))
+
 	// Router configuration
 	logger.Debugf(ctx, "[Container] Registering router and starting task server...")
 	must(container.Provide(router.NewRouter))
@@ -842,6 +868,13 @@ func BuildContainer(container *dig.Container) *dig.Container {
 	// name is a no-op, so the web build can invoke this without a local hook.
 	must(container.Invoke(func(cleaner interfaces.ResourceCleaner, _ *service.ShellJobService) {
 		cleaner.Promote("LocalShellJobs")
+	}))
+
+	// 登记进程级 SystemSettingService 单例，供无法依赖注入的地方读取运行时设置
+	// （见 service.resolveAnswerMaxTokens：对话主回答的长度上限需要每次请求实时读，
+	// 而 sessionService 的构造函数已经很长，再加一个依赖不划算）。
+	must(container.Invoke(func(ss interfaces.SystemSettingService) {
+		service.SetRuntimeSettingService(ss)
 	}))
 
 	logger.Infof(ctx, "[Container] Container initialization completed successfully")
@@ -2329,4 +2362,18 @@ func startAuditLogRetention(
 		runner.StopWithin(cleanupStepTimeout)
 		return nil
 	})
+}
+
+// licenseServiceOverride 让各入口（主要是桌面端）在 BuildContainer 之前
+// 注入真实的授权服务。
+//
+// 用包级变量而不是改 BuildContainer 的签名：BuildContainer 被多个入口
+// 和测试调用，加参数会把改动扩散到无关的地方。代价是这个变量必须只
+// 在装配前设置一次——桌面端在 main 里只调一次，符合约束。
+var licenseServiceOverride *licenser.Service
+
+// SetLicenseServiceOverride 由入口在 BuildContainer 之前调用。
+// 传 nil 表示「本入口不启用授权」，与不调用等价。
+func SetLicenseServiceOverride(svc *licenser.Service) {
+	licenseServiceOverride = svc
 }

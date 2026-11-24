@@ -3,11 +3,17 @@ package session
 import (
 	"path/filepath"
 	"strings"
+
+	"github.com/Tencent/WeKnora/internal/hostdir"
 )
 
 // HostProjectDirsLoader returns the user-approved project directories from
 // desktop prefs. Nil means no directory is approved.
-type HostProjectDirsLoader func() []string
+//
+// Aliased to hostdir.Loader so existing wiring in cmd/desktop and container
+// keeps compiling unchanged; the implementation lives in internal/hostdir to
+// avoid an import cycle with the service layer.
+type HostProjectDirsLoader = hostdir.Loader
 
 func (h *Handler) approvedDirs() []string {
 	if h == nil || h.approvedProjectDirs == nil {
@@ -19,29 +25,11 @@ func (h *Handler) approvedDirs() []string {
 // MatchApprovedDir reports whether raw names a directory the user approved
 // through the native picker, returning it cleaned.
 //
-// This is the authorization boundary for host workspaces, so it lives here
-// rather than in localsandbox: session create runs in every edition, and the
-// desktop-only sandbox must not be imported by cmd/server.
-//
-// Matching is exact after Clean. A subdirectory of an approved directory is
-// not approved: the user picked a root, and honouring children would let a
-// stored value reach deeper than the picker ever offered.
+// Kept as a thin forwarder because it is referenced from container and tests;
+// the rule itself (exact match after Clean, children not honoured) lives in
+// hostdir.MatchApproved.
 func MatchApprovedDir(raw string, approved []string) (string, bool) {
-	raw = strings.TrimSpace(raw)
-	if raw == "" || !filepath.IsAbs(raw) {
-		return "", false
-	}
-	cleaned := filepath.Clean(raw)
-	for _, dir := range approved {
-		dir = strings.TrimSpace(dir)
-		if dir == "" {
-			continue
-		}
-		if filepath.Clean(dir) == cleaned {
-			return cleaned, true
-		}
-	}
-	return "", false
+	return hostdir.MatchApproved(raw, approved)
 }
 
 // bindHostWorkspaceDir accepts an omitted/empty project_dir as unbound. A
@@ -53,4 +41,14 @@ func bindHostWorkspaceDir(raw string, approved []string) (string, bool) {
 		return "", true
 	}
 	return MatchApprovedDir(raw, approved)
+}
+
+// cleanedAbsDir is a small helper kept for readability at call sites that only
+// need the canonical form of an already-approved path.
+func cleanedAbsDir(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" || !filepath.IsAbs(raw) {
+		return ""
+	}
+	return filepath.Clean(raw)
 }

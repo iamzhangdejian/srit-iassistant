@@ -278,7 +278,9 @@
   flex-direction: column;
   margin: 0;
   padding: 20px 28px 0;
-  html.wails-desktop & { padding-top: 42px; }
+  // OEM：原生标题栏下 webview 从系统标题栏下方开始，不再需要为红黄绿按钮
+  // 额外让出 42px（那是 TitleBarHiddenInset 时期的补偿）。
+  html.wails-desktop & { padding-top: 20px; }
   @media (max-width: 720px) { padding: var(--app-space-4) var(--app-space-4) 0; }
 }
 .resource-list-main() {

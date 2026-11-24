@@ -231,10 +231,41 @@ onUnmounted(() => {
   pollTimers.clear();
 });
 
+/**
+ * 挂载一个「服务端已经登记好」的附件（项目文件 @ 引用走这条路径）。
+ *
+ * 与 addFiles 的区别：不读本地 File、不上传、不做类型/大小校验——内容已经
+ * 在服务端，documentId 就是全部信息。返回 true 表示确实新增了一个条目，
+ * false 表示同一个 documentId 已经在列表里（重复 @ 不叠加数量）。
+ */
+const addPreparedFile = (file: { documentId: string; name: string; size: number }): boolean => {
+  if (props.disabled || !file.documentId) return false;
+  if (attachments.value.some(item => item.documentId === file.documentId)) return false;
+  if (attachments.value.length >= maxFiles.value) {
+    MessagePlugin.warning(t('chat.attachmentTooMany', { max: maxFiles.value }));
+    return false;
+  }
+
+  attachments.value.push({
+    // file 仅用于满足类型约束；这条附件不需要任何本地读取路径。
+    file: new File([], file.name),
+    id: file.documentId,
+    name: file.name,
+    size: file.size,
+    type: '.' + (file.name.split('.').pop()?.toLowerCase() || ''),
+    documentId: file.documentId,
+    status: 'ready',
+    progress: 100,
+  });
+  emitFiles();
+  return true;
+};
+
 defineExpose({
   attachments,
   triggerFileSelect,
   addFiles,
+  addPreparedFile,
   clear: () => {
     pollTimers.forEach(timer => clearTimeout(timer));
     pollTimers.clear();
@@ -267,7 +298,7 @@ defineExpose({
         <div class="attachment-preview-info">
           <div class="attachment-preview-name" :title="attachment.name">{{ attachment.name }}</div>
           <div class="attachment-preview-meta">{{ formatFileSize(attachment.size) }}</div>
-          <div v-if="attachment.status !== 'local'" class="attachment-preview-status" :class="`is-${attachment.status}`">
+          <div v-if="attachment.status !== 'local' && attachment.status !== 'ready'" class="attachment-preview-status" :class="`is-${attachment.status}`">
             <span v-if="attachment.status === 'uploading' || attachment.status === 'uploaded' || attachment.status === 'processing'" class="attachment-status-spinner" />
             {{ statusLabel(attachment) }}
           </div>
@@ -288,57 +319,67 @@ defineExpose({
 
 .attachment-preview-bar {
   display: flex;
-  gap: 8px;
-  padding: 8px 12px 4px;
+  gap: 6px;
+  padding: 8px 12px 2px;
   flex-wrap: wrap;
 }
 
+/* 附件在输入框里以一行行紧凑标签呈现，与 @ 引用的知识库/文件标签视觉一致。
+   之前是 240px 宽的卡片块，两三个附件就把输入框顶得很高。 */
 .attachment-preview-item {
   position: relative;
-  display: flex;
+  display: inline-flex;
   flex-direction: row;
   align-items: center;
-  gap: 10px;
-  padding: 8px 32px 8px 10px;
-  border-radius: var(--app-radius-md);
-  border: 1px solid var(--td-border-level-1-color);
-  background: var(--td-bg-color-container);
-  max-width: 240px;
-  min-width: 140px;
+  gap: 5px;
+  height: 26px;
+  padding: 0 22px 0 7px;
+  border-radius: 6px;
+  border: 1px solid var(--td-component-stroke);
+  background: var(--td-bg-color-secondarycontainer);
+  max-width: 220px;
   cursor: default;
+
+  :deep(.artifact-file-icon),
+  > svg {
+    flex: 0 0 auto;
+    width: 14px;
+    height: 16px;
+  }
 
   .attachment-preview-info {
     flex: 1;
     min-width: 0;
     display: flex;
-    flex-direction: column;
-    gap: 2px;
+    align-items: baseline;
+    gap: 5px;
   }
 
   .attachment-preview-name {
-    font-size: var(--app-text-md);
-    font-weight: 500;
+    font-size: var(--app-text-sm);
     color: var(--td-text-color-primary);
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
   }
 
-  .attachment-preview-meta {
+  /* 大小与状态压成一行次要信息，不再占第二行 */
+  .attachment-preview-meta,
+  .attachment-preview-status {
+    flex: 0 0 auto;
     font-size: var(--app-text-xs);
-    color: var(--td-text-color-secondary);
+    color: var(--td-text-color-placeholder);
     white-space: nowrap;
+    max-width: 96px;
+    overflow: hidden;
+    text-overflow: ellipsis;
   }
 
   .attachment-preview-status {
-    max-width: 170px;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-    font-size: var(--app-text-xs);
-    color: var(--td-text-color-secondary);
+    /* ready 由模板过滤掉：解析完成是默认态，不必常驻一个绿字抢占文件名。
+       这里只剩上传中 / 解析中 / 失败三种需要提示的状态。 */
+    color: var(--td-text-color-placeholder);
 
-    &.is-ready { color: var(--td-success-color); }
     &.is-failed { color: var(--td-error-color); }
   }
 
@@ -355,22 +396,24 @@ defineExpose({
 
   .attachment-preview-remove {
     position: absolute;
-    top: 4px;
-    right: 6px;
-    width: 18px;
-    height: 18px;
-    background: rgba(0, 0, 0, 0.18);
-    color: #fff;
+    top: 50%;
+    right: 3px;
+    transform: translateY(-50%);
+    width: 16px;
+    height: 16px;
+    background: transparent;
+    color: var(--td-text-color-placeholder);
     border-radius: 50%;
     display: flex;
     align-items: center;
     justify-content: center;
-    font-size: var(--app-text-md);
+    font-size: var(--app-text-base);
     cursor: pointer;
     line-height: 1;
 
     &:hover {
-      background: rgba(0, 0, 0, 0.4);
+      background: var(--td-bg-color-container-hover);
+      color: var(--td-text-color-primary);
     }
   }
 }

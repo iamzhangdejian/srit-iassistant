@@ -23,7 +23,9 @@ export const SETTINGS_SECTION_MIN_ROLE: Record<string, SettingsRoleKey> = {
   skills: 'admin',
   mcp: 'admin',
   system: 'viewer',
-  userprofile: 'viewer',
+  // 授权状态是机器级只读事实，任何成员都能看；续期写入走
+  // POST /api/v1/license，后端不区分角色（与登录页绑码同一条通道）。
+  license: 'viewer',
   browserconnection: 'viewer',
   tenant: 'viewer',
   members: 'viewer',

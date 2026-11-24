@@ -608,13 +608,7 @@
                   class="net-row net-row--triple">
                   <t-input v-model="inject.header" :placeholder="$t('settings.sandbox.headerName')" />
                   <t-input v-model="inject.secret" type="password"
-                    :placeholder="isStoredNetworkSecretRecoverable(
-                      inject,
-                      inject.originalRuleName,
-                      inject.originalHeader,
-                      rule.name,
-                      inject.header,
-                    )
+                    :placeholder="isStoredNetworkSecretRecoverable(inject, inject.originalRuleName, inject.originalHeader, rule.name, inject.header)
                       ? $t('settings.sandbox.secretKeepHint')
                       : $t('settings.sandbox.headerValue')" />
                   <t-input v-model="inject.format" placeholder="Bearer ${SECRET}" />
@@ -672,13 +666,7 @@
                 class="net-row net-row--double">
                 <t-input v-model="header.name" :placeholder="$t('settings.sandbox.headerName')" />
                 <t-input v-model="header.value" type="password"
-                  :placeholder="isStoredNetworkSecretRecoverable(
-                    header,
-                    header.originalHost,
-                    header.originalName,
-                    rule.host,
-                    header.name,
-                  )
+                  :placeholder="isStoredNetworkSecretRecoverable(header, header.originalHost, header.originalName, rule.host, header.name)
                     ? $t('settings.sandbox.secretKeepHint')
                     : $t('settings.sandbox.headerValue')" />
                 <t-button variant="text" shape="square" size="small"
@@ -869,12 +857,12 @@ const backend = ref('')
 const defaultTimeoutSec = ref<number | undefined>(undefined)
 const terminalIdleDisconnectSec = ref<number | undefined>(undefined)
 const allowPrivateEndpoints = ref(false)
-const cube = reactive<SandboxCubeConfig>({})
-const e2b = reactive<SandboxE2BConfig>({})
-const docker = reactive<SandboxDockerConfig>({})
+const cube = ref<SandboxCubeConfig>({})
+const e2b = ref<SandboxE2BConfig>({})
+const docker = ref<SandboxDockerConfig>({})
 // Tracks which secrets the tenant already has stored, so an empty input can
 // mean "keep the saved key" instead of "no key configured".
-const storedSecrets = reactive({ cube: false, e2b: false })
+const storedSecrets = ref({ cube: false, e2b: false })
 const envRows = ref<{ key: string; value: string; stored?: boolean }[]>([])
 const skillRollout = ref<'next_turn' | 'new_session'>('next_turn')
 const allocationMode = ref<'session' | 'user'>('session')
@@ -1004,7 +992,7 @@ let templatePollTimer: ReturnType<typeof setTimeout> | undefined
 const isRemoteBackend = computed(() => backend.value === 'cube' || backend.value === 'e2b')
 const hasImageCatalog = computed(() => isRemoteBackend.value || backend.value === 'docker')
 const currentTemplateId = computed(() => (
-  backend.value === 'cube' ? cube.template_id : backend.value === 'e2b' ? e2b.template_id : ''
+  backend.value === 'cube' ? cube.value.template_id : backend.value === 'e2b' ? e2b.value.template_id : ''
 )?.trim() || '')
 const selectedTemplate = computed(() => templates.value.find((item) => item.id === currentTemplateId.value))
 const clusterStandardTemplate = computed(() => templates.value.find((item) => item.standard && item.id))
@@ -1120,7 +1108,7 @@ function checkDetail(item: SandboxCheckItem): string {
   return t(`settings.sandbox.skipReasons.${item.reason}`, item.reason)
 }
 const secretInputPlaceholder = (target: 'cube' | 'e2b') => (
-  storedSecrets[target] ? t('settings.sandbox.secretKeepHint') : t('settings.sandbox.apiKeyPlaceholder')
+  storedSecrets.value[target] ? t('settings.sandbox.secretKeepHint') : t('settings.sandbox.apiKeyPlaceholder')
 )
 
 // Mirrors sandbox.MissingRequiredFields on the server. Duplicated on purpose:
@@ -1154,9 +1142,9 @@ function onConnectionInput(field: string) {
 // Snapshot of the active backend block as it will be submitted, so a secret the
 // admin left blank on purpose still counts as filled in.
 function submittedBackendValues(): Record<string, unknown> {
-  if (backend.value === 'cube') return withStoredSecret({ ...cube }, storedSecrets.cube)
-  if (backend.value === 'e2b') return withStoredSecret({ ...e2b }, storedSecrets.e2b)
-  return { ...docker }
+  if (backend.value === 'cube') return withStoredSecret({ ...cube.value }, storedSecrets.value.cube)
+  if (backend.value === 'e2b') return withStoredSecret({ ...e2b.value }, storedSecrets.value.e2b)
+  return { ...docker.value }
 }
 
 function validateRequiredFields(includeTemplate = true): boolean {
@@ -1194,20 +1182,20 @@ function reset() {
   allowPrivateEndpoints.value = cfg.allow_private_endpoints === true
   // Replace rather than merge: a reused reactive object would otherwise carry
   // the previously edited config's fields into the next one opened.
-  Object.keys(cube).forEach((key) => delete (cube as Record<string, unknown>)[key])
-  Object.keys(e2b).forEach((key) => delete (e2b as Record<string, unknown>)[key])
-  Object.keys(docker).forEach((key) => delete (docker as Record<string, unknown>)[key])
-  Object.assign(cube, cfg.cube || {})
-  Object.assign(e2b, cfg.e2b || {})
-  Object.assign(docker, cfg.docker || {})
-  if (!Array.isArray(cube.dns_servers)) cube.dns_servers = []
-  if (backend.value === 'docker' && !docker.image) {
-    docker.image = defaultDockerImage
+  Object.keys(cube.value).forEach((key) => delete (cube.value as Record<string, unknown>)[key])
+  Object.keys(e2b.value).forEach((key) => delete (e2b.value as Record<string, unknown>)[key])
+  Object.keys(docker.value).forEach((key) => delete (docker.value as Record<string, unknown>)[key])
+  Object.assign(cube.value, cfg.cube || {})
+  Object.assign(e2b.value, cfg.e2b || {})
+  Object.assign(docker.value, cfg.docker || {})
+  if (!Array.isArray(cube.value.dns_servers)) cube.value.dns_servers = []
+  if (backend.value === 'docker' && !docker.value.image) {
+    docker.value.image = defaultDockerImage
   }
-  storedSecrets.cube = isMaskedSecret(cube.api_key)
-  storedSecrets.e2b = isMaskedSecret(e2b.api_key)
-  if (storedSecrets.cube) cube.api_key = ''
-  if (storedSecrets.e2b) e2b.api_key = ''
+  storedSecrets.value.cube = isMaskedSecret(cube.value.api_key)
+  storedSecrets.value.e2b = isMaskedSecret(e2b.value.api_key)
+  if (storedSecrets.value.cube) cube.value.api_key = ''
+  if (storedSecrets.value.e2b) e2b.value.api_key = ''
   envRows.value = Object.entries(cfg.env_vars || {}).map(([key, value]) => (
     isMaskedSecret(value) ? { key, value: '', stored: true } : { key, value }
   ))
@@ -1267,8 +1255,8 @@ function reset() {
 function selectBackend(value: string) {
   if (backend.value === value) return
   backend.value = value
-  if (value === 'docker' && !docker.image) {
-    docker.image = defaultDockerImage
+  if (value === 'docker' && !docker.value.image) {
+    docker.value.image = defaultDockerImage
   }
   onBackendChange()
 }
@@ -1317,14 +1305,14 @@ function connectionReady(): boolean {
 }
 
 function selectTemplate(value: string | number) {
-  if (backend.value === 'cube') cube.template_id = String(value)
-  else e2b.template_id = String(value)
+  if (backend.value === 'cube') cube.value.template_id = String(value)
+  else e2b.value.template_id = String(value)
   onFieldInput('template_id')
 }
 
 function clearTemplateSelection() {
-  if (backend.value === 'cube') cube.template_id = ''
-  if (backend.value === 'e2b') e2b.template_id = ''
+  if (backend.value === 'cube') cube.value.template_id = ''
+  if (backend.value === 'e2b') e2b.value.template_id = ''
   delete fieldErrors.value.template_id
 }
 
@@ -1598,9 +1586,9 @@ function collectPayload(): SandboxConfig {
   }
   // Send only the selected backend's block so an unused one cannot fail
   // validation (e.g. a stale private URL left in the other tab).
-  if (backend.value === 'cube') payload.cube = withStoredSecret({ ...cube }, storedSecrets.cube)
-  if (backend.value === 'e2b') payload.e2b = withStoredSecret({ ...e2b }, storedSecrets.e2b)
-  if (backend.value === 'docker') payload.docker = { ...docker }
+  if (backend.value === 'cube') payload.cube = withStoredSecret({ ...cube.value }, storedSecrets.value.cube)
+  if (backend.value === 'e2b') payload.e2b = withStoredSecret({ ...e2b.value }, storedSecrets.value.e2b)
+  if (backend.value === 'docker') payload.docker = { ...docker.value }
   return payload
 }
 

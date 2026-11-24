@@ -493,6 +493,11 @@ func (s *knowledgeBaseService) FillKnowledgeBaseCounts(ctx context.Context, kb *
 		if cnt, err := s.kgRepo.CountKnowledgeByKnowledgeBaseID(ctx, tenantID, kb.ID); err == nil {
 			kb.KnowledgeCount = cnt
 		}
+		// 文档类知识库同样要统计分块数：此前只有 FAQ 走下面那个分支，
+		// 导致文档库详情/列表永远显示 chunk_count=0，用户会误以为库是空的。
+		if cnt, err := s.chunkRepo.CountChunksByKnowledgeBaseID(ctx, tenantID, kb.ID); err == nil {
+			kb.ChunkCount = cnt
+		}
 	case types.KnowledgeBaseTypeFAQ:
 		if cnt, err := s.chunkRepo.CountChunksByKnowledgeBaseID(ctx, tenantID, kb.ID); err == nil {
 			kb.ChunkCount = cnt

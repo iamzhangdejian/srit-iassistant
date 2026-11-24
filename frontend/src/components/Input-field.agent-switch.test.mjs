@@ -14,13 +14,17 @@ test('composer shortcuts queue Enter, inject drafts, and promote the first queue
   const sends = [], promotes = []
   const query = ref('draft')
   const composing = ref(false)
-  const props = reactive({ isReplying: true, canSteer: true, queuedSteers: [
+  const props = reactive({ isReplying: true, canSteer: true, composerLocked: false, queuedSteers: [
     { steer_id: 'pending', delivery: 'after', pending: true },
     { steer_id: 'first', delivery: 'after' }, { steer_id: 'second', delivery: 'after' },
   ] })
   const { onKeydown } = vm.runInNewContext(ts.transpile(`${code}\n({ onKeydown })`), {
     navigator: { platform: 'MacIntel' }, computed, props, query, chatSubmitShortcut,
     isComposing: composing, showMention: ref(false),
+    // 空草稿提升队首的那条补充消息（与组件里同名 computed 同义）
+    firstQueuedSteer: computed(() =>
+      props.queuedSteers.find(item => !item.pending && !item.promoting) || null),
+    allSelectedItems: computed(() => []), focusInput: () => {},
     createSession: (...args) => sends.push(args), emit: (...args) => promotes.push(args),
   })
   const enter = { key: 'Enter', keyCode: 13, preventDefault() {}, shiftKey: false, ctrlKey: false, altKey: false }
@@ -36,24 +40,12 @@ test('composer shortcuts queue Enter, inject drafts, and promote the first queue
   assert.equal(promotes.length, 1, 'IME confirmation must not promote a message')
 })
 
-test('selecting an agent leaves web search off until the user enables it', () => {
-  const selectAgentStart = settingsStore.indexOf('selectAgent(agentId: string')
-  const getSelectedAgentStart = settingsStore.indexOf('getSelectedAgentId()', selectAgentStart)
-  const selectAgentAction = settingsStore.slice(selectAgentStart, getSelectedAgentStart)
-
-  assert.notEqual(selectAgentStart, -1)
-  assert.notEqual(getSelectedAgentStart, -1)
-  assert.match(selectAgentAction, /this\.settings\.webSearchEnabled = false/)
-
-  const handleSelectAgentStart = inputField.indexOf('const handleSelectAgent = async')
-  const handleSelectAgentEnd = inputField.indexOf('const clearvalue', handleSelectAgentStart)
-  const handleSelectAgent = inputField.slice(handleSelectAgentStart, handleSelectAgentEnd)
-
-  assert.notEqual(handleSelectAgentStart, -1)
-  assert.notEqual(handleSelectAgentEnd, -1)
-  assert.match(handleSelectAgent, /settingsStore\.selectAgent\(agent\.id, sourceTenantId\)/)
-  assert.doesNotMatch(handleSelectAgent, /agentWebSearch/)
-  assert.doesNotMatch(handleSelectAgent, /settingsStore\.toggleWebSearch/)
+// 输入框已移除智能体下拉：请求固定走 builtin-main-assistant，界面上没有
+// 任何选择入口。这条约束用「下拉组件与按钮都不再被引用」来守住。
+test('composer no longer offers an agent picker', () => {
+  assert.doesNotMatch(inputField, /AgentSelector/)
+  assert.doesNotMatch(inputField, /agent-mode-btn/)
+  assert.doesNotMatch(inputField, /showAgentModeSelector/)
 })
 
 test('shared-agent web search button waits for source readiness metadata', () => {
@@ -91,7 +83,7 @@ test('mid-run send is limited to agent sessions', () => {
   assert.match(chatView, /:canSteer="isAgentStreamSession\(\)"/)
 
   const fnStart = inputField.indexOf('const createSession = async')
-  const fnEnd = inputField.indexOf('const updateAgentModeDropdownPosition =', fnStart)
+  const fnEnd = inputField.indexOf('// 队列里排在最前面的补充消息', fnStart)
   const fn = inputField.slice(fnStart, fnEnd)
   assert.notEqual(fnStart, -1)
   assert.ok(fnEnd > fnStart)

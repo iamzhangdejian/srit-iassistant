@@ -33,6 +33,14 @@ const (
 	// BuiltinWeKnoraAssistantID is the built-in assistant that manages
 	// WeKnora itself (documents, parsing, Wiki health) for the signed-in user.
 	BuiltinWeKnoraAssistantID = "builtin-weknora-assistant"
+	// BuiltinMainAssistantID is the single assistant the desktop edition runs
+	// with. The composer never offers a picker: the frontend sends this ID on
+	// every request, so the user never has to choose a mode before chatting.
+	//
+	// It must be a ReAct agent (agent_mode: smart-reasoning). The RAG pipeline
+	// is read-only and exposes no file tools at all, so a request routed there
+	// can describe a Markdown document but can never write one to disk.
+	BuiltinMainAssistantID = "builtin-main-assistant"
 )
 
 // GrantsOperationCatalog reports whether agent may run WeKnora management
@@ -54,9 +62,23 @@ func GrantsProductDocs(agent *CustomAgent) bool {
 // management, so a user cannot configure them; the run resolves the chat
 // model from its knowledge base or the system KnowledgeQA default, and the
 // rerank model from the workspace.
+//
+// BuiltinQuickAnswerID is included because config/builtin_agents.yaml never
+// gives it a model_id: the user picks the chat model in the composer and the
+// request carries it as SummaryModelID, which resolveChatModelID prefers.
+// Without this exemption every quick-answer message failed with
+// "chat model is not configured" even though a model was selected.
+//
+// BuiltinMainAssistantID is included for the same reason: it is the desktop
+// edition's only assistant and is never exposed in agent management, so no
+// one can set its model_id. It resolves the chat model from the composer
+// selection, then the KB/system fallback.
 func UsesWorkspaceModelFallback(agent *CustomAgent) bool {
 	return agent != nil && agent.IsBuiltin &&
-		(agent.ID == BuiltinWikiFixerID || agent.ID == BuiltinWeKnoraAssistantID)
+		(agent.ID == BuiltinWikiFixerID ||
+			agent.ID == BuiltinWeKnoraAssistantID ||
+			agent.ID == BuiltinQuickAnswerID ||
+			agent.ID == BuiltinMainAssistantID)
 }
 
 // RunsInSharedKBWorkspace reports whether a built-in agent opened on one

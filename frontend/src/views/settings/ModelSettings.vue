@@ -1190,6 +1190,15 @@ useAssistantDataChange(() => { void loadModels() }, { areas: ['model'] })
   .model-search { flex: 1 1 100%; width: 100%; margin: 8px 0; }
 }
 
+/*
+ * 大屏优化：内容区不再限宽后，卡片网格可以容纳更多列。
+ * 卡片最小宽度收窄到 280px（原 320px），并允许在超宽屏上铺满整行，
+ * 避免每个卡片被拉成又宽又空的大块。
+ */
+.model-grid {
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 280px), 1fr));
+}
+
 // 模型卡片沿用工具箱的紧凑间距、圆角和悬浮反馈。
 .model-card {
   .provider-card();

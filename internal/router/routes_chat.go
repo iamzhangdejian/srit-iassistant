@@ -66,6 +66,8 @@ func RegisterSessionRoutes(
 		sessions.DELETE("/:id/messages", handler.ClearSessionMessages)
 		sessions.POST("/:session_id/generate_title", handler.GenerateTitle)
 		sessions.POST("/:session_id/attachments", handler.UploadTemporaryDocument)
+		// @ 引用项目目录里的文件：服务端直接读盘登记成临时附件，不走上传。
+		sessions.POST("/:session_id/project-refs", handler.CreateProjectFileRef)
 		sessions.GET("/:id/attachments", handler.ListTemporaryDocuments)
 		sessions.GET("/:id/attachments/:attachment_id", handler.GetTemporaryDocument)
 		sessions.GET("/:id/attachments/:attachment_id/preview", handler.PreviewTemporaryDocument)
@@ -153,9 +155,18 @@ func RegisterChatRoutes(r *gin.RouterGroup, handler *session.Handler, g *rbacGua
 	}
 
 	// Agent-based chat
-	agentChat := g.apiKeyGroup(r.Group("/agent-chat", g.Viewer()), apiKeyChat(apiKeyFullAccess()))
-	{
-		agentChat.POST("/:session_id", handler.AgentQA)
+	// OEM: AgentQA 是**唯一**会真正执行技能/插件（internal/application/service/
+	// session_agent_qa.go 的 AgentQA，内部 applyPerRequestSkillScope +
+	// PinnedSkillNames）与 MCP 工具、并可驱动沙箱自动执行命令的链路。
+	//
+	// 该端点由 FeatCutAgentChat 单独控制，与 FeatCutAgents（智能体管理接口）
+	// 解耦：桌面版没有智能体选择/管理入口，但对话必须走这条链路，否则模型
+	// 拿不到任何写文件工具，"生成 md 文档"只能输出正文而不会落盘。
+	if !FeatCutAgentChat {
+		agentChat := g.apiKeyGroup(r.Group("/agent-chat", g.Viewer()), apiKeyChat(apiKeyFullAccess()))
+		{
+			agentChat.POST("/:session_id", handler.AgentQA)
+		}
 	}
 
 	// 新增知识检索接口，不需要session_id

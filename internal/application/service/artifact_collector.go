@@ -229,6 +229,194 @@ func (c *ArtifactCollector) hostSessionSource(ctx context.Context, sessionID str
 	return nil
 }
 
+// WorkspaceRoot returns the session workspace root, which is the listing root
+// CollectPaths uses to resolve recorded paths on the host backend.
+//
+// Reports false when the session has no workspace: the caller then attaches
+// nothing rather than guessing a directory.
+func (c *ArtifactCollector) WorkspaceRoot(ctx context.Context, sessionID string) (string, bool) {
+	if c == nil {
+		return "", false
+	}
+	source := c.sessionSource(ctx, sessionID)
+	if source == nil {
+		return "", false
+	}
+	provider, ok := source.(sandbox.SessionWorkspaceLayoutProvider)
+	if !ok || provider == nil {
+		return "", false
+	}
+	layout, err := provider.SessionWorkspaceLayout(ctx, sessionID)
+	if err != nil {
+		logger.Warnf(ctx, "[ArtifactCollector] workspace layout failed: session=%s err=%v", sessionID, err)
+		return "", false
+	}
+	layout = layout.Normalized()
+	if layout.Root == "" {
+		return "", false
+	}
+	return layout.Root, true
+}
+
+// sandboxStatSource is the optional single-file lookup a source may implement
+// (every sandbox.SessionFileStore does). Statting the recorded paths avoids
+// walking the project tree just to find a handful of files.
+type sandboxStatSource interface {
+	StatSessionFile(ctx context.Context, sessionID, path string) (*sandbox.RemoteStatEntry, error)
+}
+
+// resolveWrittenEntries turns the recorded absolute paths into listing entries
+// the collector can read.
+//
+// It stats each path when the source supports it, because the recursive
+// listing it replaces is capped (maxListSessionFiles) and on a large project
+// the written file is frequently past the cap — a PDF written into a 500+ file
+// project then never became an artifact. Listings remain the fallback for
+// sources without metadata lookup, preserving the previous behaviour there.
+func resolveWrittenEntries(
+	ctx context.Context,
+	source SandboxArtifactSource,
+	sessionID, rootDir string,
+	written []string,
+) []sandbox.RemoteDirEntry {
+	if len(written) == 0 {
+		return nil
+	}
+	if statSource, ok := source.(sandboxStatSource); ok {
+		entries := make([]sandbox.RemoteDirEntry, 0, len(written))
+		for _, p := range written {
+			clean := filepath.Clean(p)
+			if !filepath.IsAbs(clean) || !withinDir(rootDir, clean) {
+				// Recorded outside the workspace root: not a session artifact.
+				continue
+			}
+			stat, err := statSource.StatSessionFile(ctx, sessionID, clean)
+			if err != nil {
+				logger.Debugf(ctx,
+					"[ArtifactCollector] stat written path failed: session=%s path=%s err=%v",
+					sessionID, clean, err)
+				continue
+			}
+			if stat == nil || stat.Type != sandbox.RemoteEntryFile {
+				continue
+			}
+			entries = append(entries, sandbox.RemoteDirEntry{
+				Name:    filepath.Base(clean),
+				Path:    clean,
+				Type:    sandbox.RemoteEntryFile,
+				Size:    stat.Size,
+				ModTime: stat.ModTime,
+			})
+		}
+		if len(entries) > 0 {
+			return PickWrittenEntries(entries, written)
+		}
+	}
+
+	entries, err := source.ListSessionFiles(ctx, sessionID, rootDir)
+	if err != nil {
+		logger.Warnf(ctx, "[ArtifactCollector] list for written paths failed: session=%s dir=%s err=%v",
+			sessionID, rootDir, err)
+		return nil
+	}
+	picked := PickWrittenEntries(entries, written)
+	if len(picked) == 0 && len(entries) > 0 {
+		logger.Infof(ctx,
+			"[ArtifactCollector] written paths not found under %s (session=%s written=%d listed=%d)",
+			rootDir, sessionID, len(written), len(entries))
+	}
+	return picked
+}
+
+// withinDir reports whether path sits inside dir (both absolute).
+func withinDir(dir, path string) bool {
+	if dir == "" {
+		return true
+	}
+	rel, err := filepath.Rel(filepath.Clean(dir), filepath.Clean(path))
+	if err != nil {
+		return false
+	}
+	return rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
+// CollectPaths persists exactly the files the turn wrote, without scanning a
+// directory.
+//
+// This is the host-backend path. There the session workspace is the user's own
+// project, so there is no separate output tree to drain and CollectTarget
+// refuses to scan Root. Instead the tools record what they wrote
+// (NoteTurnWrite) and this method collects that set.
+//
+// written holds absolute paths as recorded by the tools; listing still runs
+// under rootDir so the backend keeps applying its own path policy and the
+// entries carry authoritative size and mtime. A path that no longer exists is
+// skipped — the user may have deleted the file between the write and the
+// collect.
+func (c *ArtifactCollector) CollectPaths(
+	ctx context.Context,
+	sessionID string,
+	messageID string,
+	tenantID uint64,
+	rootDir string,
+	written []string,
+	notify func(pending int),
+) (types.MessageArtifacts, error) {
+	if c == nil || c.fileService == nil || sessionID == "" || len(written) == 0 {
+		return nil, nil
+	}
+	if rootDir == "" {
+		logger.Infof(ctx, "[ArtifactCollector] collect paths skipped: empty root (session=%s)", sessionID)
+		return nil, nil
+	}
+	source := c.sessionSource(ctx, sessionID)
+	if source == nil {
+		logger.Infof(ctx,
+			"[ArtifactCollector] collect paths skipped: no session filesystem (session=%s)", sessionID)
+		return nil, nil
+	}
+
+	ctx = sandbox.WithSessionFileOperation(ctx)
+	picked := resolveWrittenEntries(ctx, source, sessionID, rootDir, written)
+	if len(picked) == 0 {
+		logger.Infof(ctx,
+			"[ArtifactCollector] no written path resolved under %s (session=%s written=%d)",
+			rootDir, sessionID, len(written))
+		return nil, nil
+	}
+	logger.Infof(ctx, "[ArtifactCollector] collecting %d written file(s) under %s (session=%s)",
+		len(picked), rootDir, sessionID)
+
+	known := c.loadKnownSet(ctx, sessionID)
+	var uploads []pendingArtifactUpload
+	for _, entry := range picked {
+		data, hash, ok := c.readNewContent(ctx, source, sessionID, entry, known)
+		if !ok {
+			continue
+		}
+		uploads = append(uploads, pendingArtifactUpload{entry: entry, data: data, hash: hash})
+		known.remember(types.MessageArtifact{
+			SourcePath: entry.Path, ModTime: entry.ModTime, ContentHash: hash, FileSize: int64(len(data)),
+		})
+	}
+	if len(uploads) > 0 && notify != nil {
+		notify(len(uploads))
+	}
+
+	artifacts := make(types.MessageArtifacts, 0, len(uploads))
+	for _, item := range uploads {
+		art, ok := c.persistBytes(ctx, sessionID, messageID, tenantID, item.entry, item.data, item.hash)
+		if !ok {
+			continue
+		}
+		artifacts = append(artifacts, art)
+		known.remember(art)
+	}
+	logger.Infof(ctx, "[ArtifactCollector] collect paths done session=%s picked=%d attached=%d",
+		sessionID, len(picked), len(artifacts))
+	return artifacts, nil
+}
+
 // CollectTarget reports the directory Collect should scan for this session,
 // and whether collection must be skipped entirely.
 //

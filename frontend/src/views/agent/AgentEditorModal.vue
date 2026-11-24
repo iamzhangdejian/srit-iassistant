@@ -558,8 +558,8 @@
           <div
             class="setting-row"
             data-guide="agent-create-model"
-            data-agent-field="summary_model"
-            :class="{ 'setting-row--field-highlight': highlightedField === 'summary_model' }"
+            data-agent-field="chat_model"
+            :class="{ 'setting-row--field-highlight': highlightedField === 'chat_model' }"
           >
             <div class="setting-info">
               <label>{{ $t('agent.editor.model') }} <span class="required">*</span></label>
@@ -652,7 +652,7 @@
             v-if="showRerankModelField"
             class="setting-row"
             data-agent-field="rerank_model"
-            :class="{ 'setting-row--field-highlight': highlightedField === 'rerank_model' }"
+            :class="{ 'setting-row--field-highlight': highlightedField === 'chat_model' }"
           >
             <div class="setting-info">
               <label>
@@ -2036,12 +2036,18 @@ const currentSection = ref(resolveEditorSection(props.initialSection));
 useAssistantPageContext(() => props.visible && props.mode === 'edit' ? { section: currentSection.value } : null);
 const suggestionTab = ref<'starters' | 'followUps'>('starters');
 const contentWrapperRef = ref<HTMLElement | null>(null);
-const highlightedField = ref<AgentNotReadyReasonKey | null>(null);
+const highlightedField = ref<AgentHighlightField | null>(null);
 let highlightClearTimer: ReturnType<typeof setTimeout> | null = null;
 
-const VALID_HIGHLIGHT_FIELDS: AgentNotReadyReasonKey[] = ['summary_model', 'rerank_model', 'allowed_tools'];
+/**
+ * 高亮锚点：取值要与模板里 data-agent-field 的属性值一一对应。
+ * chat_model 已被 rerank 行复用（rerank 不再作为未就绪原因，跳转时统一落在
+ * 模型那一组的第一行），所以这里单独维护，不直接复用 AgentNotReadyReasonKey。
+ */
+type AgentHighlightField = AgentNotReadyReasonKey | 'rerank_model';
+const VALID_HIGHLIGHT_FIELDS: AgentHighlightField[] = ['chat_model', 'rerank_model', 'allowed_tools'];
 
-const sectionForHighlightField = (field: AgentNotReadyReasonKey): string => {
+const sectionForHighlightField = (field: AgentHighlightField): string => {
   if (field === 'allowed_tools') return 'tools';
   return 'model';
 };
@@ -2057,9 +2063,9 @@ const clearFieldHighlight = () => {
 };
 
 const applyInitialFieldHighlight = async (field: string) => {
-  if (!VALID_HIGHLIGHT_FIELDS.includes(field as AgentNotReadyReasonKey)) return;
+  if (!VALID_HIGHLIGHT_FIELDS.includes(field as AgentHighlightField)) return;
 
-  const targetField = field as AgentNotReadyReasonKey;
+  const targetField = field as AgentHighlightField;
   currentSection.value = sectionForHighlightField(targetField);
 
   await nextTick();

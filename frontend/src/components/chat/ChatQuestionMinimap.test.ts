@@ -16,7 +16,8 @@ test('opens a following preview card to the right of the left-side rail', () => 
   assert.match(component, /question-minimap__answer/)
   assert.doesNotMatch(component, /question-minimap__kicker/)
   assert.match(component, /CLOSE_DELAY_MS = 180/)
-  assert.match(component, /left: var\(--chat-content-inset, 20px\)/)
+  // 锚点导航贴在内容区右侧（原先贴左边缘，用户反馈找不到）
+  assert.match(component, /right: calc\(var\(--chat-scrollbar-gutter, 0px\) \+ 26px\)/)
   assert.match(component, /top: `\$\{peakYPx\}px`/)
   assert.doesNotMatch(component, /flex-direction: row-reverse/)
   assert.doesNotMatch(component, /right: `\$\{scrollbarGutterPx \+ RAIL_INSET_PX\}px`/)

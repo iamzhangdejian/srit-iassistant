@@ -16,6 +16,12 @@ import (
 
 func TestNewRouterFrontendStaticEditionOptIn(t *testing.T) {
 	gin.SetMode(gin.TestMode)
+	// OEM: MCP 能力由 FeatCutMCP 主动裁剪，本测试末尾会断言未认证的
+	// /mcp/endpoint 请求返回 401；路由被裁剪后该断言必然失败，
+	// 静态资源部分虽仍有效，但断言链已断，裁剪期间整体跳过。
+	if FeatCutMCP {
+		t.Skip("final MCP assertion is cut by FeatCutMCP")
+	}
 	for _, tc := range []struct {
 		name      string
 		edition   string

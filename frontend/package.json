@@ -48,6 +48,7 @@
     "xlsx": "https://cdn.sheetjs.com/xlsx-0.20.2/xlsx-0.20.2.tgz"
   },
   "devDependencies": {
+    "@intlify/core-base": "^11.4.19",
     "@tsconfig/node22": "^22.0.5",
     "@types/node": "^22.14.0",
     "@vitejs/plugin-vue": "6.0.6",

@@ -127,6 +127,14 @@ instance.interceptors.response.use(
     // 根据业务状态码处理逻辑
     const { status, data } = response;
     if (status >= 200 && status < 300) {
+      // 二进制响应（Range 分段预览）需要 Content-Range 等响应头，但拦截器
+      // 会把 body 直接返回；把需要的元数据挂到 buffer 上，读取端再取。
+      if (response.config?.responseType === 'arraybuffer' && data instanceof ArrayBuffer) {
+        Object.defineProperties(data, {
+          __weknoraStatus: { value: status, enumerable: false },
+          __weknoraHeaders: { value: response.headers, enumerable: false },
+        });
+      }
       return withHttpStatus(data, status);
     } else {
       return Promise.reject(withHttpStatus(data, status));
@@ -239,6 +247,41 @@ export async function getDown(url: string): Promise<Blob> {
     responseType: "blob",
   }) as unknown as Blob;
   return res
+}
+
+/**
+ * 带 Range 头取一段二进制（大文件预览用）。
+ *
+ * 为什么不用 `getDown`：80MB 以上的 PDF 全量读进内存既慢又容易被 webview 掐掉，
+ * pdf.js 的 range transport 只需要按页要字节。这里返回的 `total` 来自
+ * `Content-Range: bytes 0-0/12345`，服务端若忽略 Range（返回 200）则退化为
+ * 「一次拿到整份」，`total` 取实际长度。
+ */
+export async function getRangeChunk(
+  url: string,
+  begin: number,
+  end: number,
+): Promise<{ chunk: Uint8Array; total: number }> {
+  type TaggedBuffer = ArrayBuffer & {
+    __weknoraStatus?: number
+    __weknoraHeaders?: Record<string, string>
+  }
+  const buffer = (await instance.get(url, {
+    responseType: 'arraybuffer',
+    headers: { Range: `bytes=${begin}-${Math.max(begin, end - 1)}` },
+    // 206 是正常路径；200 说明服务端不支持 Range，也要接住。
+    validateStatus: (status: number) => status === 206 || status === 200,
+  })) as unknown as TaggedBuffer
+  const status = buffer.__weknoraStatus ?? 200
+  if (status === 200) {
+    // 服务端忽略了 Range：这次已经拿到整份文件。
+    return { chunk: new Uint8Array(buffer), total: buffer.byteLength }
+  }
+  const headers = buffer.__weknoraHeaders || {}
+  const header = String(headers['content-range'] || headers['Content-Range'] || '')
+  const match = /bytes\s+\d+-\d+\/(\d+)/i.exec(header)
+  const total = match ? Number(match[1]) : begin + buffer.byteLength
+  return { chunk: new Uint8Array(buffer), total }
 }
 
 export function postUpload(

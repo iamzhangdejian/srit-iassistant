@@ -25,11 +25,24 @@ type desktopPrefs struct {
 // is how the two drift.
 
 func desktopConfigDir() (string, error) {
+	// 便携模式优先：WK_PORTABLE_DIR 下所有状态集中存放。
+	//
+	// 这是**运维逃生舱**，不是常规配置途径。双击 .app 启动时 macOS
+	// 不会继承 shell 里的环境变量，用户也看不到终端，所以正常使用
+	// 永远不会走到这条分支——数据目录必须能自己定下来。
+	if portable := strings.TrimSpace(os.Getenv("WK_PORTABLE_DIR")); portable != "" {
+		return portable, nil
+	}
 	// Tests (and some Unix setups) isolate via XDG_CONFIG_HOME. Darwin's
 	// UserConfigDir ignores that variable, so honor it first or prefs tests
 	// write into the real Application Support directory.
 	if xdg := strings.TrimSpace(os.Getenv("XDG_CONFIG_HOME")); xdg != "" {
 		return xdg, nil
+	}
+	// 兜底也必须确定：显式拼出 ~/Library/Application Support，与
+	// defaultMacAppSupportDir 保持同一个答案，避免两处各说各话。
+	if home, err := os.UserHomeDir(); err == nil && home != "" {
+		return filepath.Join(home, "Library", "Application Support"), nil
 	}
 	return os.UserConfigDir()
 }
@@ -39,7 +52,7 @@ func desktopPrefsDir() (string, error) {
 	if err != nil {
 		return "", err
 	}
-	dir := filepath.Join(cfg, "WeKnora Lite")
+	dir := filepath.Join(cfg, "国研智研体")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return "", err
 	}

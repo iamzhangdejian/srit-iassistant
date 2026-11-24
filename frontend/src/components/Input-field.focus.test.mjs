@@ -6,7 +6,7 @@ import ts from 'typescript'
 
 const source = readFileSync(new URL('./Input-field.vue', import.meta.url), 'utf8')
 const focusCode = source.slice(source.indexOf('const focusInput ='), source.indexOf('const onInput ='))
-const sendCode = source.slice(source.indexOf('const createSession ='), source.indexOf('const updateAgentModeDropdownPosition ='))
+const sendCode = source.slice(source.indexOf('const createSession ='), source.indexOf('// 队列里排在最前面的补充消息'))
 
 test('host page navigation preserves the assistant draft and uploads but clears the main chat composer', () => {
   const start = source.indexOf('onBeforeRouteUpdate(')
@@ -114,6 +114,8 @@ test('teardown blurs the active textarea before it is detached', () => {
   vm.runInNewContext(code, {
     onBeforeUnmount: fn => { teardown = fn }, getTextareaEl: () => textarea,
     document: { activeElement: textarea },
+    // 同一个卸载钩子还负责清理召回参数的防抖保存定时器，这里给个空值即可
+    recallSaveTimer: null, window: { clearTimeout: () => {} },
   })
   teardown()
   assert.equal(blurred, true)

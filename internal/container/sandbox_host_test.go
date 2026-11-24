@@ -77,7 +77,7 @@ func TestDefaultHostSessionRootUsesDotWeknora(t *testing.T) {
 }
 
 func TestDefaultHostSkillsRootIsDotWeknora(t *testing.T) {
-	require.Equal(t, "/Users/dev/.weknora/skills", defaultHostSkillsRoot("/Users/dev"))
+	require.Equal(t, "/Users/dev/.weknora/skills", DefaultHostSkillsRoot("/Users/dev"))
 }
 
 func TestHostSandboxManagerEnabledWhenBackendAvailable(t *testing.T) {

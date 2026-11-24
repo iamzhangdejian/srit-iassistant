@@ -120,6 +120,23 @@ func (a *App) RemoveProjectDir(dir string) error {
 	return removeApprovedProjectDir(dir)
 }
 
+// OpenInSystemApp 用系统默认应用打开项目目录里的一个文件。
+//
+// 预览面板在「内置渲染拿不准」时用它兜底（例如转换失败的复杂 Word 文档）。
+// 路径必须落在用户授权过的项目目录内，校验在 revealPathInFileManager /
+// resolveApprovedPath 里完成，不信任前端。
+func (a *App) OpenInSystemApp(path string) error {
+	return openPathInSystemApp(path)
+}
+
+// RevealInFinder 在系统文件管理器中选中该文件。
+//
+// 与 RevealApprovedProjectDir（HTTP handler 用）共用同样的白名单语义，
+// 但校验放在进程内，因为调用方是 webview 里的 JS。
+func (a *App) RevealInFinder(path string) error {
+	return revealPathInFileManager(path)
+}
+
 // PickProjectDir opens the system directory picker and appends the result to
 // the approved list. Users must pick a folder this way; typed paths are not
 // an authorization path.

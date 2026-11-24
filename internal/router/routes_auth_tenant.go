@@ -6,6 +6,7 @@ import (
 	"github.com/gin-gonic/gin"
 
 	"github.com/Tencent/WeKnora/internal/handler"
+	"github.com/Tencent/WeKnora/internal/licenser"
 	"github.com/Tencent/WeKnora/internal/middleware"
 	"github.com/Tencent/WeKnora/internal/types"
 )
@@ -64,7 +65,8 @@ func RegisterTenantRoutes(
 		// when the caller has cross-tenant privileges. JWT-only for now.
 		tenantRoutes.GET("/current", g.Viewer(), handler.GetCurrentWorkspace)
 		tenantRoutes.PATCH("/current", g.Owner(), handler.UpdateCurrentWorkspace)
-		if memberHandler != nil {
+		// OEM: 单租户精简模式，不展示团队成员入口。
+		if memberHandler != nil && !FeatCutOrganization {
 			tenantRoutes.GET("/current/members", g.Viewer(), memberHandler.ListCurrentWorkspaceMembers)
 		}
 		// 创建空间对所有已登录用户开放：用户可以为自己再开一个工作区，
@@ -115,7 +117,8 @@ func RegisterTenantRoutes(
 			// tenant op. /:id/leave is Viewer+ — any member can quit on
 			// their own; the service still rejects when it would leave
 			// the tenant without an Owner.
-			if memberHandler != nil {
+			// OEM: 成员管理整体关闭（单租户）。
+			if memberHandler != nil && !FeatCutOrganization {
 				g.apiKeyRoute(tenantByID, http.MethodGet, "/members", apiKeyManageMembers(apiKeyFullAccess()), g.Viewer(), memberHandler.ListMembers)
 				g.apiKeyRoute(tenantByID, http.MethodPost, "/members", apiKeyManageMembers(apiKeyFullAccess()), g.Owner(), memberHandler.AddMember)
 				g.apiKeyRoute(tenantByID, http.MethodPut, "/members/:user_id", apiKeyManageMembers(apiKeyFullAccess()), g.Owner(), memberHandler.UpdateMemberRole)
@@ -132,7 +135,8 @@ func RegisterTenantRoutes(
 			// existing /members mutation gates. nil-skip pattern
 			// mirrors memberHandler above for environments built
 			// without the invitation dependency wired.
-			if invitationHandler != nil {
+			// OEM: 邀请成员关闭（单租户）。
+			if invitationHandler != nil && !FeatCutOrganization {
 				g.apiKeyRoute(tenantByID, http.MethodGet, "/invitations", apiKeyManageMembers(apiKeyFullAccess()), g.Viewer(), invitationHandler.ListTenantInvitations)
 				g.apiKeyRoute(tenantByID, http.MethodPost, "/invitations", apiKeyManageMembers(apiKeyFullAccess()), g.Owner(), invitationHandler.CreateInvitation)
 				g.apiKeyRoute(tenantByID, http.MethodDelete, "/invitations/:inv_id", apiKeyManageMembers(apiKeyFullAccess()), g.Owner(), invitationHandler.RevokeInvitation)
@@ -148,7 +152,8 @@ func RegisterTenantRoutes(
 			// PathTenantMatch group already prevents cross-tenant
 			// reads. nil-skip mirrors the memberHandler pattern above
 			// for environments wired without the audit dependency.
-			if auditLogHandler != nil {
+			// OEM: 审计报表关闭。
+			if auditLogHandler != nil && !FeatCutAuditReport {
 				tenantByID.GET("/audit-log", g.Admin(), auditLogHandler.ListTenantAuditLog)
 			}
 		}
@@ -228,24 +233,30 @@ func RegisterMyCredentialVaultRoutes(r *gin.RouterGroup, h *handler.CredentialVa
 
 // RegisterAuthRoutes registers authentication routes
 func RegisterAuthRoutes(r *gin.RouterGroup, handler *handler.AuthHandler, g *rbacGuards) {
-	r.POST("/auth/register", handler.Register)
-	// Share-link surfaces are unauthenticated and accept a plaintext
-	// token from the caller; rate-limit by IP to bound brute-force /
-	// enumeration / abuse traffic. Limiter is shared across both
-	// endpoints (see middleware/auth_public_ratelimit.go) so total
-	// budget per IP is intuitive.
-	publicAuthRL := middleware.PublicAuthRateLimit()
-	r.POST("/auth/register-by-invite", publicAuthRL, handler.RegisterByInvite)
-	r.POST("/auth/invitations/lookup", publicAuthRL, handler.LookupInvitationByToken)
-	r.POST("/auth/login", handler.Login)
+	// OEM：交付形态的进入凭证只有授权码，账号密码 / 邀请注册 / OIDC 单点登录
+	// 整组不注册（FeatCutPasswordAuth，见 router.go 的说明）。剩下的
+	// /auth/auto-setup（桌面一次性令牌）、/auth/refresh、/auth/logout、
+	// /auth/validate、/auth/me 等是维持会话所必需的，照旧注册。
+	if !FeatCutPasswordAuth {
+		r.POST("/auth/register", handler.Register)
+		// Share-link surfaces are unauthenticated and accept a plaintext
+		// token from the caller; rate-limit by IP to bound brute-force /
+		// enumeration / abuse traffic. Limiter is shared across both
+		// endpoints (see middleware/auth_public_ratelimit.go) so total
+		// budget per IP is intuitive.
+		publicAuthRL := middleware.PublicAuthRateLimit()
+		r.POST("/auth/register-by-invite", publicAuthRL, handler.RegisterByInvite)
+		r.POST("/auth/invitations/lookup", publicAuthRL, handler.LookupInvitationByToken)
+		r.POST("/auth/login", handler.Login)
+		r.GET("/auth/oidc/config", handler.GetOIDCConfig)
+		r.GET("/auth/oidc/url", handler.GetOIDCAuthorizationURL)
+		r.GET("/auth/oidc/callback", handler.OIDCRedirectCallback)
+		// /auth/oidc/start：直连 302 跳转到 OIDC 提供方，供前端无法走 JS 拉取 URL 的场景直接发起登录
+		r.GET("/auth/oidc/start", handler.OIDCStart)
+	}
 	r.POST("/auth/auto-setup", handler.AutoSetup)
 	r.GET("/auth/config", handler.GetAuthConfig)
 	r.POST("/auth/switch-tenant", handler.SwitchTenant)
-	r.GET("/auth/oidc/config", handler.GetOIDCConfig)
-	r.GET("/auth/oidc/url", handler.GetOIDCAuthorizationURL)
-	r.GET("/auth/oidc/callback", handler.OIDCRedirectCallback)
-	// /auth/oidc/start：直连 302 跳转到 OIDC 提供方，供前端无法走 JS 拉取 URL 的场景直接发起登录
-	r.GET("/auth/oidc/start", handler.OIDCStart)
 	r.POST("/auth/refresh", handler.RefreshToken)
 	r.GET("/auth/validate", handler.ValidateToken)
 	r.POST("/auth/logout", handler.Logout)
@@ -254,7 +265,6 @@ func RegisterAuthRoutes(r *gin.RouterGroup, handler *handler.AuthHandler, g *rba
 	// leaving it default-deny was why scoped keys got a 403 here.
 	g.apiKeyRoute(r, http.MethodGet, "/auth/me", apiKeyAny(), handler.GetCurrentUser)
 	r.PUT("/auth/me/preferences", handler.UpdateMyPreferences)
-	r.POST("/auth/change-password", handler.ChangePassword)
 }
 
 // RegisterSystemRoutes registers system information routes
@@ -272,6 +282,21 @@ func RegisterSystemRoutes(
 	// JWT-only: this pops a native dialog on the Lite machine. API keys must
 	// not trigger it. Undeclared for the API-key gate, so keys are denied.
 	r.POST("/system/host-project-dir", g.Viewer(), handler.PickHostProjectDir)
+
+	// 已授权目录的列出与撤销。同样 JWT-only：
+	//   - 列出：让界面如实显示沙箱当前能访问哪些目录
+	//   - 撤销：用户收回授权。缺少此接口时，用户一旦选过目录就无法再撤销，
+	//           因为反向代理下的 SPA 调不到 Wails 的 RemoveProjectDir 绑定。
+	r.GET("/system/project-dirs", g.Viewer(), handler.ListHostProjectDirs)
+	r.POST("/system/project-dirs/revoke", g.Viewer(), handler.RevokeHostProjectDir)
+	// 在系统文件管理器中打开项目目录。前端的 window.open("file://…") 在
+	// WKWebView 里会被拒绝，所以这个动作必须由后端进程以原生方式执行。
+	// 只接受授权白名单内的目录，未授权的路径返回 403。
+	r.POST("/system/project-dirs/reveal", g.Viewer(), handler.RevealHostProjectDir)
+	// 对话页「项目文件」面板：列出已授权项目目录下的文件并可下载。
+	// 与 reveal 同属只读视图，Viewer 即可；越界校验在 handler 内做。
+	r.GET("/system/project-files", g.Viewer(), handler.ListHostProjectFiles)
+	r.GET("/system/project-files/download", g.Viewer(), handler.DownloadHostProjectFile)
 
 	systemRoutes := g.apiKeyGroup(r.Group("/system"), apiKeyManageVectorStores(apiKeyFullAccess()))
 	{
@@ -388,4 +413,21 @@ func RegisterSystemAdminRoutes(
 				apiKeyPlatform(types.APIKeyCapabilitySystemAuditRead), auditLogHandler.ListSystemAuditLog)
 		}
 	}
+}
+
+// RegisterLicenseRoutes 注册授权相关接口。
+//
+// 与 RegisterAuthRoutes 分开是因为这个接口组有特殊定位：
+//   - GET  /api/v1/license 没有授权也必须能访问（否则用户看不到机器码，
+//     也就无法要码；这是死锁，必须在设计上排除）；
+//   - POST /api/v1/license 是唯一的例外写接口，无授权时也放行，
+//     否则「导入授权码」这个动作会被自己的闸门挡住。
+//
+// licenser.IsAllowedPath 里已经列了这两条，中间件与这里保持一致。
+func RegisterLicenseRoutes(r *gin.RouterGroup, handler *licenser.Handler) {
+	if handler == nil {
+		return
+	}
+	r.GET("/license", handler.Status)
+	r.POST("/license", handler.Apply)
 }

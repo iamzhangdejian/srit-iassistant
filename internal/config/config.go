@@ -148,6 +148,16 @@ type ConversationConfig struct {
 	EnableRerank         bool           `yaml:"enable_rerank"                    json:"enable_rerank"`
 	Summary              *SummaryConfig `yaml:"summary"                          json:"summary"`
 
+	// MaxAnswerTokens 是「对话主回答」的输出 token 上限。
+	//
+	// 历史上这个上限借用的是 summary.max_completion_tokens——那是给
+	// 文档摘要/画像用的紧凑预算（1024），套到主回答上会导致长报告写到
+	// 一半被硬切断。两者语义不同，因此拆成独立字段：summary 继续服务
+	// 后台建索引与评测（保持紧凑、不拖慢入库），主回答单独配置。
+	//
+	// 0 表示未配置，由 backfillConversationDefaults 兜底成 DefaultAnswerMaxTokens。
+	MaxAnswerTokens int `yaml:"max_answer_tokens" json:"max_answer_tokens"`
+
 	// Prompt template ID fields — resolved to text by backfillConversationDefaults
 	FallbackPromptID             string `yaml:"fallback_prompt_id"                json:"fallback_prompt_id"`
 	RewritePromptID              string `yaml:"rewrite_prompt_id"                 json:"rewrite_prompt_id"`
@@ -1026,9 +1036,23 @@ func applyAuditDefaults(cfg *Config) {
 
 // into actual prompt text content. Only xxx_id fields are used;
 // no fallback to default templates.
+// DefaultAnswerMaxTokens 是对话主回答的输出 token 上限兜底值。
+//
+// 取值依据：同机部署的 Qwen3.6-35B-A3B-4bit 支持 62288 输出 token，
+// 16384 足够写出一篇一万两千字的完整报告，又不至于让模型动辄
+// 长篇大论、长时间占住显存和请求。需要更长时可在
+// 「系统设置 → 运行与并发 → 对话最大回答长度」里实时调整。
+const DefaultAnswerMaxTokens = 16384
+
 func backfillConversationDefaults(cfg *Config) {
 	pt := cfg.PromptTemplates
 	conv := cfg.Conversation
+
+	// 主回答预算兜底。这里只兜底「未配置」的情况，显式写 0 也视为未配置：
+	// 一个 0 的生成上限会让模型什么都不输出，不是有意义的配置。
+	if conv.MaxAnswerTokens <= 0 {
+		conv.MaxAnswerTokens = DefaultAnswerMaxTokens
+	}
 
 	if conv.FallbackPromptID != "" {
 		if t := FindTemplateByID(pt, conv.FallbackPromptID); t != nil {

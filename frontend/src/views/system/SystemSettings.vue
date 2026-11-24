@@ -154,7 +154,7 @@
                 <t-input-number v-else-if="item.value_type === 'int'" v-model="editValues[item.key]"
                   :placeholder="placeholderFor(item)" :aria-label="keyLabel(item.key)"
                   :disabled="savingKey === item.key" theme="normal" :step="1" :min="minimumFor(item)"
-                  class="setting-input" @blur="onChange(item)" />
+                  :max="maximumFor(item)" class="setting-input" @blur="onChange(item)" />
                 <t-popconfirm v-else-if="item.value_type === 'string_list' && item.key === 'ssrf.whitelist'"
                   v-model:visible="ssrfPopconfirm.visible" :content="ssrfPopconfirm.content"
                   :theme="ssrfPopconfirm.theme" :confirm-btn="ssrfPopconfirm.confirmBtn"
@@ -405,6 +405,9 @@ const SETTINGS_SECTION_KEYS: Record<Exclude<SettingsSection, 'other' | 'users'>,
     'asynq.shared_concurrency',
     'asynq.wiki_concurrency',
     'model.max_concurrency',
+    // 对话主回答的输出上限。放在这里是因为它和并发一样属于
+    // 「运行期资源占用」类旋钮，改完对下一次对话立即生效。
+    'conversation.max_answer_tokens',
   ],
   security: ['ssrf.whitelist', 'sandbox.docker_enabled'],
 }
@@ -627,7 +630,19 @@ function placeholderFor(item: SystemSettingItem): string {
 
 function minimumFor(item: SystemSettingItem): number {
   if (item.key.startsWith('asynq.') && item.key.endsWith('_concurrency')) return 1
+  // 回答长度为 0 没有意义（模型会一个字都不输出），至少给 256。
+  if (item.key === 'conversation.max_answer_tokens') return 256
   return 0
+}
+
+/**
+ * 整数类设置项的上限，仅用于挡住明显的手滑（多打一个 0）。
+ * 没有特殊约束的项不限上限，保持与后端校验一致。
+ */
+function maximumFor(item: SystemSettingItem): number | undefined {
+  // 200k 已远超任何本地/云端模型的实际输出能力，留出充足余量。
+  if (item.key === 'conversation.max_answer_tokens') return 200000
+  return undefined
 }
 
 async function loadSettings() {

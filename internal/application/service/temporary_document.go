@@ -28,13 +28,25 @@ var temporaryDocumentExtensions = map[string]struct{}{
 	".docx": {}, ".doc": {}, ".pdf": {}, ".ppt": {}, ".pptx": {}, ".epub": {}, ".mhtml": {},
 	".xmind": {},
 	".xlsx":  {}, ".xls": {},
-	".md": {}, ".markdown": {}, ".txt": {}, ".csv": {}, ".json": {}, ".xml": {}, ".yaml": {}, ".yml": {}, ".log": {}, ".html": {},
 	".jpg": {}, ".jpeg": {}, ".png": {}, ".gif": {}, ".bmp": {}, ".tiff": {}, ".webp": {},
 	".mp3": {}, ".wav": {}, ".m4a": {}, ".flac": {}, ".ogg": {}, ".aac": {},
 }
 
+// temporaryTextExtensions are read as-is instead of going through a document
+// parser. It deliberately covers source code as well: a project directory is
+// mostly code, and quoting a .go/.ts file into the conversation is the main
+// reason to @-reference it. Anything here is treated as UTF-8 plain text, so
+// binary extensions must never be added.
 var temporaryTextExtensions = map[string]struct{}{
 	".md": {}, ".markdown": {}, ".txt": {}, ".csv": {}, ".json": {}, ".xml": {}, ".yaml": {}, ".yml": {}, ".log": {},
+	".htm": {}, ".html": {}, ".css": {}, ".scss": {}, ".less": {}, ".sass": {}, ".svg": {}, ".toml": {}, ".ini": {},
+	".conf": {}, ".cfg": {}, ".env": {}, ".properties": {}, ".sql": {}, ".graphql": {}, ".proto": {},
+	// 源码：项目目录里最主要的内容，语音识别/文档解析器都处理不了，直接按文本读。
+	".go": {}, ".py": {}, ".js": {}, ".jsx": {}, ".ts": {}, ".tsx": {}, ".vue": {}, ".java": {}, ".kt": {}, ".kts": {},
+	".c": {}, ".h": {}, ".cc": {}, ".cpp": {}, ".hpp": {}, ".cs": {}, ".php": {}, ".rb": {}, ".rs": {}, ".swift": {},
+	".m": {}, ".mm": {}, ".scala": {}, ".lua": {}, ".pl": {}, ".r": {}, ".dart": {}, ".ex": {}, ".exs": {},
+	".sh": {}, ".bash": {}, ".zsh": {}, ".fish": {}, ".ps1": {}, ".bat": {}, ".cmd": {}, ".mk": {}, ".dockerfile": {},
+	".gradle": {}, ".sbt": {}, ".cmake": {}, ".tex": {}, ".rst": {}, ".adoc": {}, ".patch": {}, ".diff": {},
 }
 
 // sessionAttachmentLookup is the message-store surface Get/OpenFile need to
@@ -168,6 +180,10 @@ func (s *temporaryDocumentService) Create(
 }
 
 func (s *temporaryDocumentService) supportsExtension(ctx context.Context, tenantID uint64, ext string) bool {
+	// 纯文本/源码类型也走这条准入：它们不过解析器，只是为了能被引用进对话。
+	if _, ok := temporaryTextExtensions[ext]; ok {
+		return true
+	}
 	if _, ok := temporaryDocumentExtensions[ext]; ok {
 		return true
 	}

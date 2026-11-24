@@ -1,5 +1,6 @@
 <template>
   <div class="panel-resize-handle" :class="[`panel-resize-handle--${edge}`, { 'is-dragging': dragging }]"
+    :style="{ '--hit-width': `${hitWidth}px` }"
     role="separator" aria-orientation="vertical" :aria-label="label" tabindex="0"
     :aria-valuenow="value" :aria-valuemin="min" :aria-valuemax="max"
     @pointerdown="start" @pointermove="move" @pointerup="finish" @pointercancel="finish"
@@ -11,7 +12,19 @@
 <script setup lang="ts">
 import { onBeforeUnmount, ref } from 'vue'
 
-defineProps<{ edge: 'left' | 'right'; label: string; value: number; min: number; max: number }>()
+withDefaults(defineProps<{
+  edge: 'left' | 'right'
+  label: string
+  value: number
+  min: number
+  max: number
+  /**
+   * 命中区宽度。手柄本体只有 8px，伪元素把可拖拽区域加宽到便于抓取，
+   * 但加宽后可能盖住紧贴边缘的按钮（侧栏行尾的「更多」正是这种情况），
+   * 所以侧栏实例用更窄的值。
+   */
+  hitWidth?: number
+}>(), { hitWidth: 52 })
 const emit = defineEmits<{ start: []; resize: [delta: number, keyboard: boolean]; end: [] }>()
 const dragging = ref(false)
 let drag: { element: HTMLElement; pointerId: number; x: number; scale: number; cursor: string; userSelect: string } | null = null
@@ -78,13 +91,14 @@ onBeforeUnmount(() => finish())
   &--right { right: 0; --grip-offset: 12px; }
 
   // Bridge the gap around the floating grip without covering the neighboring
-  // scrollbar along the entire edge.
+  // scrollbar along the entire edge. Width is driven by --hit-width so callers
+  // whose panel edge sits next to clickable controls can narrow it.
   &::before {
     content: '';
     position: absolute;
     top: 50%;
     left: 50%;
-    width: 52px;
+    width: var(--hit-width, 52px);
     height: 80px;
     transform: translate(-50%, -50%);
   }

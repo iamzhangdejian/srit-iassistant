@@ -21,7 +21,8 @@ test('composer browser button is disabled and opens settings when the extension 
 
 test('mention button matches icon controls and leaves the count to the selected chips', () => {
   const css = inputField.slice(inputField.indexOf('.kb-btn {'), inputField.indexOf('.kb-btn-text'))
-  assert.match(css, /width: 28px/)
+  // 24px：与相邻的附件 / 本机浏览器圆形按钮统一，给工具条省出横向空间
+  assert.match(css, /width: 24px/)
   assert.match(css, /&:hover:not\(\.disabled\):not\(\.active\)/)
   assert.doesNotMatch(css, /box-shadow: inset/)
   assert.doesNotMatch(inputField, /class="kb-count"/)

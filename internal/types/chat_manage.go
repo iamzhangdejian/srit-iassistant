@@ -141,6 +141,28 @@ func (i QueryIntent) NeedsKBRetrieval() bool {
 	}
 }
 
+// NeedsKBRetrievalWithKB 是 NeedsKBRetrieval 的「已挂载知识库」版本。
+//
+// 与 NeedsKBRetrieval 的区别：会话里已经勾选了知识库时，追问（follow_up）
+// 也必须检索。原因是 follow_up 只说明「问题指代上文」，并不说明「上文与
+// 知识库无关」——用户先在前一轮基于知识库问完，再追问「上面那点展开讲讲」，
+// 此时跳过检索会让模型拿着没有出处的历史自说自话，答案退化成通用知识。
+//
+// 仍然不检索的意图：greeting / chitchat / summarize / image_only /
+// doc_only —— 这些要么根本不需要外部资料，要么只针对本轮附件。
+//
+// hasKnowledgeBase 由调用方按本轮实际挂载的知识库列表计算，为空时行为与
+// NeedsKBRetrieval 完全一致，保证未挂库的会话不受影响。
+func (i QueryIntent) NeedsKBRetrievalWithKB(hasKnowledgeBase bool) bool {
+	if i.NeedsKBRetrieval() {
+		return true
+	}
+	if !hasKnowledgeBase {
+		return false
+	}
+	return i == IntentFollowUp
+}
+
 // Retrieval stage names recorded on RetrievalTruncation.Stage, in pipeline
 // order.
 const (
@@ -223,6 +245,13 @@ type PipelineState struct {
 	// MemoryPrompt is the long-term memory envelope appended to the system
 	// prompt for this turn, empty when memory is off or nothing matched.
 	MemoryPrompt string `json:"-"`
+	// RetrievalPlanned records whether this turn will actually retrieve
+	// evidence (knowledge base chunks or web pages). The system prompt depends
+	// on it: the "these are untrusted source data" boundary and the
+	// "answer only from the materials" instructions only make sense when
+	// evidence is being supplied, and leave the model unsure what to do on a
+	// pure-chat turn. Set once when the pipeline is assembled.
+	RetrievalPlanned bool `json:"-"`
 	// UsedMemories mirrors MemoryPrompt in structured form so the answer can
 	// tell the user which memories it saw.
 	UsedMemories UsedMemories `json:"-"`
@@ -251,12 +280,14 @@ type ChatManage struct {
 // For IntentWebSearch, retrieval is only needed if web search is enabled;
 // otherwise the intent prompt (intent_prompts.yaml "web_search") tells the
 // user web search is unavailable. All other intents delegate to
-// QueryIntent.NeedsKBRetrieval().
+// QueryIntent.NeedsKBRetrievalWithKB, which additionally keeps follow-up
+// questions on retrieval whenever the turn actually has a knowledge base
+// attached — see that method for the rationale.
 func (c *ChatManage) NeedsRetrieval() bool {
 	if c.Intent == IntentWebSearch {
 		return c.WebSearchEnabled
 	}
-	return c.Intent.NeedsKBRetrieval()
+	return c.Intent.NeedsKBRetrievalWithKB(len(c.KnowledgeBaseIDs) > 0)
 }
 
 // NormalizeQueryIntent maps a model-produced intent label onto a known
@@ -369,6 +400,7 @@ func (c *ChatManage) Clone() *ChatManage {
 			QuotedContext:        c.QuotedContext,
 			SystemPromptOverride: c.SystemPromptOverride,
 			MemoryPrompt:         c.MemoryPrompt,
+			RetrievalPlanned:     c.RetrievalPlanned,
 			UsedMemories:         append(UsedMemories(nil), c.UsedMemories...),
 			RenderedContexts:     c.RenderedContexts,
 			ContextImages:        slices.Clone(c.ContextImages),

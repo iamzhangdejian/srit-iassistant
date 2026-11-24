@@ -361,6 +361,11 @@ func (t *WriteSandboxFileTool) Execute(ctx context.Context, args json.RawMessage
 	logger.Infof(ctx, "[Tool][WriteSandboxFile] session=%s path=%s mode=%s chunk_bytes=%d total_bytes=%d",
 		sessionID, clean, mode, len(chunk), len(content))
 
+	// Report the file for artifact collection. On the host backend the
+	// collector never scans the project, so without this the file would exist
+	// on disk yet never appear in the session's artifacts panel.
+	noteTurnWrite(sessionID, resolveObservedPath(rootDir, clean))
+
 	// Check the whole file, not just this chunk: a chunk boundary lands in the
 	// middle of the source, so only the assembled result can be judged.
 	added := CountContentLines(string(chunk))

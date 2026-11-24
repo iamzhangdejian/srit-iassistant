@@ -17,6 +17,12 @@ type CreateSessionRequest struct {
 	// be an absolute path already present in the user-approved ProjectDirs
 	// list. Empty means the session gets an auto-allocated workspace.
 	ProjectDir string `json:"project_dir,omitempty"`
+	// ProjectID attaches the session to a project (工作空间 → 项目 → 会话).
+	// When set, the project's bound directory becomes this session's
+	// HostWorkspaceDir, so the sandbox keeps reading a single column.
+	// Empty falls back to "the project that owns ProjectDir", then to the
+	// workspace default project.
+	ProjectID string `json:"project_id,omitempty"`
 }
 
 // GenerateTitleRequest defines the request structure for generating a session title

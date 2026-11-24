@@ -1,11 +1,18 @@
 <template>
-    <div class="aside_box" :class="{ 'aside_box--collapsed': uiStore.sidebarCollapsed, 'aside_box--resizing': uiStore.sidebarResizing }">
-        <!-- 展开时：Logo + 搜索/折叠按钮同行 -->
-        <div class="logo_row" v-if="!uiStore.sidebarCollapsed">
-            <div class="logo_box" @click="router.push('/platform/knowledge-bases')" style="cursor: pointer;">
-                <img class="logo" src="@/assets/img/weknora.png" alt="">
-                <sup v-if="isLiteEdition" class="lite-badge">Lite</sup>
-            </div>
+    <div class="aside_box" :class="{ 'aside_box--collapsed': uiStore.sidebarCollapsed, 'aside_box--resizing': uiStore.sidebarResizing }" :style="sidebarStyleVars" :data-density="sidebarDensity">
+        <!--
+          OEM：窗口控制条（仅桌面端展开态渲染）。
+          内嵌标题栏（mac.TitleBarHiddenInset）下，macOS 的红黄绿按钮由系统绘制在
+          窗口左上角、浮在 webview 之上，占据约 76x28 的区域。
+          这一行把「折叠侧栏 / 全局搜索」放到红绿灯同一水平线的右侧空白处，
+          既利用了原本整条 38px 都是空白的顶部区域，又把这两个按钮从品牌行挪走，
+          品牌名和版本号因此不再被挤成「知识工...」。
+
+          为什么用 margin-left 让位而不是 padding：红绿灯是系统绘制的，
+          我们只能用空白让开它；76px ≈ 3 个按钮 + 间距 + 左边距的实测总宽。
+        -->
+        <div class="sidebar_winctl" v-if="!uiStore.sidebarCollapsed">
+            <div class="sidebar_winctl__spacer" aria-hidden="true"></div>
             <div class="logo_actions">
                 <t-tooltip v-if="assistantStore.entry === 'sidebar'" :content="assistantName" placement="bottom">
                     <AssistantButton data-guide="assistant-entry" icon-only :icon-size="18" :label="assistantName"
@@ -33,6 +40,48 @@
                 </div>
             </div>
         </div>
+
+        <!-- 展开时：Logo + 产品名 + 版本号 -->
+        <div class="logo_row" v-if="!uiStore.sidebarCollapsed">
+            <!--
+              OEM 白标点位：Logo 与产品名。
+              替换方式：把 frontend/public/oem/logo.svg（或 logo.png）换成客户素材即可，
+              无需改代码。产品名在 src/config/oem.ts 的 BRAND.name 中统一配置。
+            -->
+            <div class="logo_box" @click="router.push(OEM_HOME_ROUTE)" style="cursor: pointer;">
+                <!--
+                  圆形 badge：品牌图标统一收进正圆容器里。
+                  为什么不用裸 <img>：素材是 228x202 的竖版透明 PNG，直接放进
+                  侧栏会按比例缩成一个又窄又高的矩形，和右侧的品牌名基线对不齐。
+                  圆形容器 + object-fit: contain 让任意比例的素材都落在同一个视觉
+                  尺寸内，换素材不需要再调宽度。
+                  白底 + 1px 描边是为了托住透明边角（图案不是满幅的），
+                  深色模式下描边与底色跟随主题变量自动切换。
+                -->
+                <span v-if="!logoFailed" class="logo-badge">
+                    <img class="logo-badge__img" :src="BRAND.logo" :alt="BRAND.name" @error="logoFailed = true">
+                </span>
+                <span v-else class="logo-badge logo-badge--fallback">{{ BRAND.shortName.slice(0, 1) }}</span>
+                <!--
+                  产品名与图标并排。图标只负责"图形识别"，名称由文字承担：
+                  这样换成任何比例的素材都不会出现"字被压扁看不清"的问题，
+                  也避免用户要求改品牌名时还得重做一张图。
+                  窄档位下自动隐藏，只留图标（图标已有 title/alt 提示）。
+                -->
+                <span class="logo-name" v-if="sidebarDensity !== 'compact'">
+                    <!--
+                      OEM：改回内嵌标题栏后系统标题栏被隐藏，版本号信息不能丢。
+                      但侧栏顶部这一行只有约 250px，图标 + 品牌名 + 3 个操作按钮
+                      已经把空间占满（实测品牌名只剩 62px 会被截成「知识工...」），
+                      所以版本号放在品牌名下方第二行，用弱化的小字号，不抢主视觉。
+                      版本号由 Go 侧 OnDomReady 注入 window.__WK_APP_VERSION__，
+                      浏览器环境没有该变量时整块不渲染。
+                    -->
+                    <span class="logo-name__text">{{ BRAND.name }}</span>
+                    <span class="logo-name__version" v-if="appVersion">{{ appVersion }}</span>
+                </span>
+            </div>
+        </div>
         <!-- 折叠时：展开按钮 -->
         <t-tooltip v-else :content="t('menu.expandSidebar')" placement="right">
             <div class="menu_item sidebar-toggle-item" @click="uiStore.toggleSidebar">
@@ -53,11 +102,15 @@
             </div>
         </t-tooltip>
 
-        <!-- 空间选择器：仅在用户可切换空间时显示 -->
-        <TenantSelector v-if="canAccessAllTenants && !uiStore.sidebarCollapsed" />
+        <!--
+            项目树已从侧栏移除，提升为一级菜单项「项目」（位于「系统设置」下方）。
+            侧栏保留历史会话列表；项目内的会话在项目页查看与管理。
+        -->
 
-        <!-- 侧栏边缘拖拽调宽，拖窄时自动收缩 -->
-        <PanelResizeHandle edge="right" :label="t('knowledgeStages.resizeDrawer')"
+        <!-- 侧栏边缘拖拽调宽，拖窄时自动收缩。
+             命中区收窄到 16px：默认的 52px 会盖住会话行尾的「更多」按钮，
+             导致重命名/删除点击落在手柄上而不是按钮上。 -->
+        <PanelResizeHandle edge="right" :label="t('knowledgeStages.resizeDrawer')" :hit-width="16"
             :value="uiStore.sidebarDisplayWidth" :min="SIDEBAR_COLLAPSED_WIDTH" :max="SIDEBAR_MAX_WIDTH"
             @start="startSidebarResize" @resize="resizeSidebar" @end="uiStore.sidebarResizing = false" />
 
@@ -86,8 +139,14 @@
                         :label="assistantName" :active="assistantStore.visible" @click="assistantStore.toggle()" />
                 </t-tooltip>
             </div>
-            <div class="menu_box" :class="{ 'menu_box--sticky': item.children && !uiStore.sidebarCollapsed }"
-                v-for="(item, index) in topMenuItems" :key="index">
+            <!--
+                项目树：紧跟在「系统设置」菜单项之后渲染，但它是独立的块（不在
+                topMenuItems 循环里），这样才能带着自己的标题、会话插槽和展开态。
+                用 v-if 判断「上一个菜单项是 settings」，保证顺序由菜单配置驱动，
+                将来调整菜单顺序时项目树会自动跟着走。
+            -->
+            <template v-for="(item, index) in topMenuItems" :key="index">
+                <div class="menu_box" :class="{ 'menu_box--sticky': item.children && !uiStore.sidebarCollapsed }">
                 <t-tooltip :content="item.title" placement="right" :disabled="!uiStore.sidebarCollapsed">
                     <div @click="handleMenuClick(item.path)" @mouseenter="mouseenteMenu(item.path)"
                         @mouseleave="mouseleaveMenu(item.path)" :data-guide="`nav-${item.path}`"
@@ -95,7 +154,7 @@
                         <div class="menu_item-box">
                             <div class="menu_icon" :class="`menu_icon--${item.icon}`">
                                 <img class="icon"
-                                    :src="getImgSrc(item.icon == 'zhishiku' ? knowledgeIcon : item.icon == 'agent' ? agentIcon : item.icon == 'artifact' ? artifactIcon : item.icon == 'automation' ? automationIcon : item.icon == 'toolbox' ? toolboxIcon : item.icon == 'organization' ? organizationIcon : item.icon == 'logout' ? logoutIcon : item.icon == 'setting' ? settingIcon : prefixIcon)"
+                                    :src="getImgSrc(item.icon == 'zhishiku' ? knowledgeIcon : item.icon == 'agent' ? agentIcon : item.icon == 'artifact' ? artifactIcon : item.icon == 'automation' ? automationIcon : item.icon == 'toolbox' ? toolboxIcon : item.icon == 'organization' ? organizationIcon : item.icon == 'setting' ? settingIcon : prefixIcon)"
                                     alt="">
                             </div>
                             <template v-if="!uiStore.sidebarCollapsed">
@@ -121,6 +180,54 @@
                     </div>
                 </t-tooltip>
             </div>
+
+                <!--
+                    项目树插在「系统设置」下方：保持「项目 → 项目内会话」的树状展开。
+                    上方的功能项与下方项目区是两套不同性质的东西（功能入口 vs 资源树），
+                    所以在两者之间放一条分隔线 + 上下留白，视觉上分成两块。
+                -->
+                <div v-if="item.path === 'settings' && !uiStore.sidebarCollapsed" class="menu_box menu_box--projects">
+                    <div class="menu_box__divider" role="separator" aria-hidden="true"></div>
+                    <ProjectTree :expanded-id="expandedProjectId" @expand="onProjectExpand" @created="onProjectCreated"
+                        @new-session="onProjectNewSession">
+                        <template #sessions="{ project }">
+                            <!--
+                                项目下的会话行。复用历史列表同一套 SessionSidebarRow 与菜单动作，
+                                所以置顶/改名/删除/运行中/未读这些能力在两处行为完全一致。
+                                这里不再按日期分组：项目本身已经是分组，多套分组会让缩进层级过深。
+                            -->
+                            <div class="project-sessions-slot" :data-project-id="project.id">
+                                <template v-if="sessionsByProject[project.id]?.length">
+                                    <div v-for="subitem in sessionsByProject[project.id]" :key="subitem.id"
+                                        class="submenu_item_p session-chat-row project-session-row"
+                                        :data-session-id="subitem.id" :class="{
+                                            'session-chat-row--active': !batchMode && subitem.path === currentSecondpath,
+                                            'session-chat-row--selected': batchMode && batchSelectedIds.includes(subitem.id),
+                                            'session-chat-row--revealed': revealedSessionId === subitem.id,
+                                        }">
+                                        <div class="session-list-row session-list-row--flat">
+                                            <div class="session-list-row__body">
+                                                <SessionSidebarRow :item="subitem" :batch-mode="batchMode"
+                                                    :running="Boolean(sessionActivityEntries[subitem.id])"
+                                                    :unread="Boolean(sessionUnread[subitem.id])"
+                                                    :active-path="currentSecondpath" :selected-ids="batchSelectedIds"
+                                                    :menu-options="buildSessionMenuOptions(subitem)"
+                                                    @navigate="gotopage(subitem.path)"
+                                                    @toggle-select="toggleBatchSelect(subitem.id)"
+                                                    @menu-click="handleSessionMenuClick($event, subitem)"
+                                                    @rename-submit="renameSessionTitle(subitem, $event.title)"
+                                                    @hover-in="mouseenteBotDownr(subitem.id)"
+                                                    @hover-out="mouseleaveBotDown" />
+                                            </div>
+                                        </div>
+                                    </div>
+                                </template>
+                                <div v-else class="project-sessions-empty">{{ t('menu.noSessions') }}</div>
+                            </div>
+                        </template>
+                    </ProjectTree>
+                </div>
+            </template>
 
             <!-- 历史会话：按来源筛选后统一按日期分组展示 -->
             <div class="submenu" v-if="!uiStore.sidebarCollapsed">
@@ -152,7 +259,9 @@
                         </div>
                     </template>
                     <template v-else-if="activeBucket?.loaded && filteredGroupedSessions.length === 0">
-                        <div class="submenu_empty">{{ t('menu.noSessions') }}</div>
+                        <!-- 历史区只列未归属项目的会话，所以这里可能「加载完成但为空」，
+                             此时会话其实都在上面的项目树里，用 noSessions 会让人误以为丢了。 -->
+                        <div class="submenu_empty">{{ t('project.historyEmpty') }}</div>
                     </template>
                     <template v-else>
                         <template v-for="group in filteredGroupedSessions" :key="group.key">
@@ -194,7 +303,7 @@
             </div>
         </div>
 
-        <!-- 批量管理底部操作条：固定在侧栏底部、用户头像上方 -->
+        <!-- 批量管理底部操作条：固定在侧栏底部、授权条上方 -->
         <div v-if="batchMode && !uiStore.sidebarCollapsed" class="batch-inline-footer">
             <div class="batch-footer-left">
                 <t-checkbox :checked="isAllBatchSelected" :indeterminate="isBatchIndeterminate"
@@ -213,9 +322,9 @@
             </div>
         </div>
 
-        <!-- 下半部分：用户菜单 -->
+        <!-- 侧栏底部：只有授权状态入口，没有头像/用户名/退出登录 -->
         <div class="menu_bottom">
-            <UserMenu />
+            <SidebarLicenseBar />
         </div>
 
     </div>
@@ -225,10 +334,14 @@
 import { storeToRefs } from 'pinia';
 import { onMounted, onUnmounted, watch, computed, ref, h, nextTick } from 'vue';
 import { useRoute, useRouter } from 'vue-router';
+// OEM: 白标配置（Logo / 产品名 / 首页路由）
+import { BRAND, OEM_HOME_ROUTE, SIDEBAR_DENSITY, pickSidebarDensity, resolveSidebarWidth, type SidebarDensityKey } from '@/config/oem';
 import { getSessionsList, batchDelSessions, deleteAllSessions, getSession } from "@/api/chat/index";
 import { useChatResourcesStore } from '@/stores/chatResources';
 import { listAllIMChannels } from '@/api/agent/index';
 import SessionSidebarRow from './SessionSidebarRow.vue';
+// OEM：底部只保留授权入口（没有账号体系）
+import SidebarLicenseBar from './SidebarLicenseBar.vue';
 import PanelResizeHandle from './PanelResizeHandle.vue';
 import { SIDEBAR_COLLAPSED_WIDTH, SIDEBAR_MIN_WIDTH, SIDEBAR_MAX_WIDTH } from '@/utils/sidebarWidth';
 import {
@@ -271,11 +384,12 @@ import {
     findSessionBucketKey,
     shouldShowSessionSourceFilter,
 } from './sessionSidebarSourceFilter';
-import { logout as logoutApi } from '@/api/auth';
 import { useMenuStore } from '@/stores/menu';
 import { useSettingsStore } from '@/stores/settings';
 import { useSessionActivityStore } from '@/stores/sessionActivity';
 import { useAuthStore } from '@/stores/auth';
+import { useProjectStore } from '@/stores/project';
+import ProjectTree from '@/components/ProjectTree.vue';
 import { useDeploymentCapabilitiesStore } from '@/stores/deploymentCapabilities';
 import { TOOLBOX_ITEMS, canAccessToolboxSection } from '@/config/toolbox';
 import BrowserIcon from '@/components/icons/BrowserIcon.vue';
@@ -286,8 +400,6 @@ import { useCommandPaletteStore } from '@/stores/commandPalette';
 import { useAssistantStore } from '@/stores/assistant';
 import AssistantButton from '@/components/assistant/AssistantButton.vue';
 import { MessagePlugin, DialogPlugin, Icon as TIcon } from "tdesign-vue-next";
-import UserMenu from '@/components/UserMenu.vue';
-import TenantSelector from '@/components/TenantSelector.vue';
 import { useI18n } from 'vue-i18n';
 import { useEditorResourcesStore } from '@/stores/editorResources';
 
@@ -389,6 +501,30 @@ const sessionSourceOptions = computed(() =>
     ),
 );
 const activeBucket = computed(() => sessionBuckets.value[activeSessionBucketKey.value]);
+
+// 侧栏项目树用：把所有已加载桶里的会话按 project_id 归一。
+// 这里刻意复用 flattened buckets 而不是另发请求——项目树和历史列表看的是同一份数据，
+// 归档/改名/置顶在任何一处发生都能立刻同步，不会出现两个列表不一致。
+// flattenBucketItems 返回的裸行不带 path（历史列表是在分组时才补 `chat/${id}`），
+// 而 SessionSidebarRow 的 navigate 事件与激活态判断都依赖 path，所以这里统一补上。
+// SessionSidebarRow 要求 title/path 必填，而裸行两者都可能缺，这里一次性补齐。
+type SidebarSessionRow = SessionForGrouping & { path: string; title: string };
+const withRowPath = (item: SessionForGrouping): SidebarSessionRow => ({
+    ...item,
+    path: `chat/${item.id}`,
+    title: item.title || t('menu.newSession'),
+});
+
+// 按项目分组的会话（供侧栏项目树的 sessions 插槽使用）。
+const sessionsByProject = computed<Record<string, SidebarSessionRow[]>>(() => {
+    const out: Record<string, SidebarSessionRow[]> = {};
+    for (const item of flattenBucketItems(sessionBuckets.value, bucketOrder.value)) {
+        const pid = item.project_id || '';
+        if (!pid) continue;
+        (out[pid] ||= []).push(withRowPath(item));
+    }
+    return out;
+});
 const hasAnySession = computed(() =>
     Object.values(sessionBuckets.value).some((bucket) => bucket.items.length > 0),
 );
@@ -420,8 +556,32 @@ const batchDisplayCount = computed(() =>
     isAllBatchSelected.value ? total.value : batchSelectedIds.value.length
 )
 
-// 是否可以访问所有空间
-const canAccessAllTenants = computed(() => authStore.canAccessAllTenants);
+// ── 项目层（工作空间 → 项目 → 会话）───────────────────────────────
+// 侧栏项目树整体放在「系统设置」菜单项下方，保持「项目 → 项目内会话」的树状展开。
+// 只保留一个展开的项目：侧栏宽度有限，同时展开多个会把会话列表挤到折叠线以下。
+const projectStore = useProjectStore();
+const expandedProjectId = ref<string>('');
+
+function onProjectExpand(id: string) {
+    expandedProjectId.value = id;
+}
+
+// 新项目建好后刷新会话列表：默认项目变化会影响后续新建会话的归属。
+function onProjectCreated() {
+    void projectStore.fetchProjects(true);
+}
+
+/**
+ * 在某项目下开新会话。
+ *
+ * 输入框里的项目下拉已移除，因此「会话归属哪个项目」只能由用户在这里
+ * 从项目节点发起。带上 ?project=<id> 进新会话页，由那一页在创建会话时
+ * 提交 project_id；不带项目直接进新会话页会被后端拒绝（请先选择项目）。
+ */
+function onProjectNewSession(project: { id: string }) {
+    expandedProjectId.value = project.id;
+    void router.push({ path: '/platform/creatChat', query: { project: project.id } });
+}
 
 // 是否处于知识库详情页（不包括全局聊天）
 const isInKnowledgeBase = computed<boolean>(() => {
@@ -494,7 +654,9 @@ const getIconActiveState = (itemPath: string) => {
 };
 
 // 分离上下两部分菜单（使用 visibleMenuArr 以便 lite 模式过滤 logout）
-const TOP_MENU_PATHS = new Set(['creatChat', 'knowledge-bases', 'artifacts', 'agents', 'automations', 'toolbox', 'organizations']);
+// OEM 改造：把 settings 也纳入主菜单区，让「模型管理」成为左侧导航的第四项
+// （原版 settings 只藏在右下角用户菜单里，与需求「左侧导航 4 项」不符）。
+const TOP_MENU_PATHS = new Set(['creatChat', 'knowledge-bases', 'artifacts', 'agents', 'automations', 'toolbox', 'organizations', 'settings']);
 
 const topMenuItems = computed<MenuItem[]>(() => {
     return (visibleMenuArr.value as unknown as MenuItem[]).filter((item: MenuItem) => TOP_MENU_PATHS.has(item.path));
@@ -522,11 +684,22 @@ const dateBucketLabels = computed<Record<DateBucketKey, string>>(() => ({
     earlier: t('time.earlier'),
 }));
 
+// 底部历史列表 = 当前会话来源下的全部会话，按日期分组。
+//
+// 归属项目的会话会同时出现在这里的日期分组中；侧栏项目树用于按项目维度
+// 浏览和新建，两者不冲突（项目树可收起，历史列表始终可用）。
+// 历史区固定只列未归属项目的会话（见下方 computed），所以空态也统一用
+// 「没有未归属项目的会话」，避免出现「暂无对话」但其实会话都在项目树里。
 const filteredGroupedSessions = computed(() => {
     const bucket = activeBucket.value;
     if (!bucket?.items.length) return [];
+    // 已归属项目的会话在项目树里展示，历史区只列「未归属项目」的会话，
+    // 否则同一个会话会在侧栏出现两次，用户无从判断该点哪一个。
+    // 项目树被收起时也不回填：项目节点仍然可见，点开就能找到会话。
+    const ungrouped = bucket.items.filter((item) => !item.project_id);
+    if (!ungrouped.length) return [];
     return groupSessionsByDate(
-        bucket.items.map((item) => ({
+        ungrouped.map((item) => ({
             ...item,
             path: `chat/${item.id}`,
             title: item.title || '',
@@ -804,6 +977,7 @@ const mapSessionRow = (item: any) => ({
     description: item.description || '',
     user_id: item.user_id || '',
     parent_session_id: item.parent_session_id || '',
+    project_id: item.project_id || '',
 });
 
 const syncMenuStoreFromBuckets = () => {
@@ -826,6 +1000,9 @@ const menuChildToSessionRow = (item: Record<string, unknown>): SessionForGroupin
         description: typeof item.description === 'string' ? item.description : '',
         user_id: typeof item.user_id === 'string' ? item.user_id : '',
         parent_session_id: typeof item.parent_session_id === 'string' ? item.parent_session_id : '',
+        // 必须带 project_id：侧栏按它把会话挂到项目节点下。漏了会让新会话
+        // 掉进「未归属项目」，项目节点里反而看不到刚建的会话。
+        project_id: typeof item.project_id === 'string' ? item.project_id : '',
     };
 };
 
@@ -1073,13 +1250,91 @@ const handleSessionMutation = (event: Event) => {
     if (detail.removed) {
         sessionBuckets.value = removeSessionFromBuckets(sessionBuckets.value, detail.sessionId);
         syncMenuStoreFromBuckets();
+        // 项目节点上的「N 个会话」徽标来自项目列表接口，删会话后必须重拉，
+        // 否则数字停在旧值（删完会话徽标还显示 2）。
+        if (projectStore.loaded) void projectStore.fetchProjects(true);
         if (detail.sessionId === route.params.chatid) {
             router.push('/platform/creatChat');
         }
     }
 };
 
+// ---------------------------------------------------------------------------
+// 侧栏密度档位（窄屏自适应）
+//
+// 之前侧栏所有尺寸都写死在 LESS 里，没有任何 @media 断点：1440px 和 760px 视口下
+// 侧栏恒为 260px、图标恒为 18px、行高恒为 34px，窄屏时把对话区挤得很窄。
+// 这里改为三档密度（compact / regular / relaxed），由视口宽度和用户拖拽的
+// 侧栏宽度共同决定，最终写成一串 CSS 变量挂在 .aside_box 上，
+// 侧栏内部（含 TenantSelector、会话列表）统一读变量，避免「图标缩了行高没缩」。
+// ---------------------------------------------------------------------------
+// Logo 加载失败兜底：某些内网部署会拦掉 /oem/* 静态资源，
+// 这时不该留一块空白，直接退化成产品名文字。
+const logoFailed = ref(false);
+// OEM：版本号角标。桌面版由 Go 侧 OnDomReady 注入 window.__WK_APP_VERSION__。
+//
+// 时序注意：Wails 的 OnDomReady 可能早于 Vue 组件 setup 完成，也可能晚到；
+// 因此这里既在 setup 时读一次，也在 onMounted 后再读一次兜底。
+// 浏览器里访问时该全局变量不存在，角标不渲染（不硬编码版本，避免与制品不一致）。
+const readAppVersion = (): string => {
+    if (typeof window === 'undefined') return '';
+    return String((window as any).__WK_APP_VERSION__ || '').trim();
+};
+const appVersion = ref<string>(readAppVersion());
+const viewportWidth = ref(typeof window === 'undefined' ? 1440 : window.innerWidth);
+const sidebarDensity = computed<SidebarDensityKey>(() =>
+    pickSidebarDensity(viewportWidth.value, uiStore.sidebarDisplayWidth),
+);
+// 窄屏下侧栏宽度随视口收缩（宽屏仍是用户拖拽的值，不打扰）
+const responsiveSidebarWidth = computed(() =>
+    resolveSidebarWidth(viewportWidth.value, uiStore.sidebarDisplayWidth, SIDEBAR_MIN_WIDTH),
+);
+const sidebarStyleVars = computed(() => {
+    const d = SIDEBAR_DENSITY[sidebarDensity.value];
+    return {
+        // 宽度也写进行内变量：.aside_box 的 width 读 var(--sidebar-width)，
+        // 这里覆盖它即可让收缩生效，且不破坏展开/折叠的过渡动画。
+        '--sidebar-width': `${responsiveSidebarWidth.value}px`,
+        '--sidebar-icon-size': `${d.icon}px`,
+        '--sidebar-icon-gap': `${d.gap}px`,
+        '--sidebar-inset-x': `${d.inset}px`,
+        '--sidebar-row-height': `${d.rowHeight}px`,
+        '--sidebar-logo-height': `${d.logoHeight}px`,
+        '--sidebar-logo-max-width': `${d.logoMaxWidth}px`,
+        '--sidebar-section-gap': `${d.sectionGap}px`,
+        // 文案列起点 = 内边距 + 图标 + 间距；三处对齐都靠它
+        '--sidebar-text-inset': `${d.inset + d.icon + d.gap}px`,
+        // 次级间距（Logo 行下方、空间选择器下方）：跟随档位，约为钮间距的一半
+        '--sidebar-subgap': `${Math.round(d.gap * 1.25)}px`,
+    };
+});
+
+// 用 requestAnimationFrame 节流，拖拽窗口边缘时不至于每像素触发一次重算
+let viewportRaf = 0;
+const handleViewportResize = () => {
+    if (viewportRaf) return;
+    viewportRaf = requestAnimationFrame(() => {
+        viewportRaf = 0;
+        viewportWidth.value = window.innerWidth;
+    });
+};
+
 onMounted(async () => {
+    // OEM：Wails 的版本注入（OnDomReady → WindowExecJS）与 Vue 挂载没有先后保证，
+    // 这里补读一次并在 3 秒内轻量轮询，读到就停——避免角标因为几百毫秒的时序差永远不出现。
+    if (!appVersion.value) {
+        appVersion.value = readAppVersion();
+        if (!appVersion.value) {
+            const timer = window.setInterval(() => {
+                const v = readAppVersion();
+                if (v) {
+                    appVersion.value = v;
+                    window.clearInterval(timer);
+                }
+            }, 300);
+            window.setTimeout(() => window.clearInterval(timer), 3000);
+        }
+    }
     sessionActivity.restore();
     void sessionActivity.refresh();
     sessionActivityTimer = setInterval(() => { void sessionActivity.refresh(); }, 5000);
@@ -1090,6 +1345,7 @@ onMounted(async () => {
     }
 
     window.addEventListener(SESSION_MUTATION_EVENT, handleSessionMutation);
+    window.addEventListener('resize', handleViewportResize, { passive: true });
 
     isLiteEdition.value = authStore.isLiteMode
     editorResources.ensureSystemInfo().then(() => {
@@ -1119,6 +1375,11 @@ onUnmounted(() => {
     clearTimeout(forkRevealTimer);
     sessionActivity.clear();
     window.removeEventListener(SESSION_MUTATION_EVENT, handleSessionMutation);
+    window.removeEventListener('resize', handleViewportResize);
+    if (viewportRaf) {
+        cancelAnimationFrame(viewportRaf);
+        viewportRaf = 0;
+    }
 });
 
 watch([() => route.name, () => route.params], (newvalue, oldvalue) => {
@@ -1148,7 +1409,6 @@ watch([() => route.name, () => route.params], (newvalue, oldvalue) => {
 });
 let knowledgeIcon = ref('zhishiku-green.svg');
 let prefixIcon = ref('prefixIcon.svg');
-let logoutIcon = ref('logout.svg');
 let settingIcon = ref('setting.svg');
 let agentIcon = ref('agent.svg');
 let artifactIcon = ref('artifact.svg');
@@ -1186,11 +1446,15 @@ const getIcon = (path: string) => {
     // 设置图标：只在设置页面显示绿色
     settingIcon.value = settingsActiveState.isSettingsActive ? 'setting-green.svg' : 'setting.svg';
 
-    // 退出图标：始终显示默认
-    logoutIcon.value = 'logout.svg';
 }
 getIcon(typeof route.name === 'string' ? route.name as string : (route.name ? String(route.name) : ''))
 const handleMenuClick = async (path: string) => {
+    // 离开设置页时必须先关掉设置，否则 showSettingsModal 会一直为 true，
+    // 设置页继续占满内容区，用户会以为"菜单点了没反应"。
+    // 目标就是 settings 时不清（下面分支会重新 openSettings）。
+    if (path !== 'settings' && uiStore.showSettingsModal) {
+        uiStore.closeSettings()
+    }
     if (path === 'knowledge-bases') {
         // 知识库菜单项：如果在知识库内部，跳转到当前知识库文件页；否则跳转到知识库列表
         const kbId = await getCurrentKbId()
@@ -1205,17 +1469,13 @@ const handleMenuClick = async (path: string) => {
         // 组织菜单项：跳转到组织列表
         router.push('/platform/organizations')
     } else if (path === 'settings') {
-        // 设置菜单项：打开设置弹窗并跳转路由
-        uiStore.openSettings()
-        router.push('/platform/settings')
+        // OEM: 这里的设置页已收敛为「模型管理」，
+        // 默认直接落在模型配置分区，而不是通用的 general 分区。
+        uiStore.openSettings('models')
+        router.push('/platform/settings?section=models')
     } else {
         gotopage(path)
     }
-}
-
-// 处理退出登录确认
-const handleLogout = () => {
-    gotopage('logout')
 }
 
 const getCurrentKbId = async (): Promise<string | null> => {
@@ -1228,21 +1488,7 @@ const getCurrentKbId = async (): Promise<string | null> => {
 
 const gotopage = async (path: string) => {
     pathPrefix.value = path;
-    // 处理退出登录
-    if (path === 'logout') {
-        try {
-            // 调用后端API注销
-            await logoutApi();
-        } catch (error) {
-            // 即使API调用失败，也继续执行本地清理
-            console.error('注销API调用失败:', error);
-        }
-        // 清理所有状态和本地存储
-        authStore.logout();
-        MessagePlugin.success(t('menu.logoutSuccess'));
-        router.push('/login');
-        return;
-    } else {
+    {
         if (path === 'creatChat') {
             // 再次点击当前「新对话」时路由不会变化，仍需清空上一条草稿的引用。
             if (isInCreatChat.value) useSettingsStore().clearChatReferences()
@@ -1289,11 +1535,32 @@ const resizeSidebar = (delta: number, keyboard: boolean) => {
 <style lang="less" scoped>
 .aside_box {
     // 侧栏水平栅格：图标列与文案列统一对齐（Logo / 菜单 / 会话分组 / 会话行）
-    --sidebar-inset-x: 10px;
+    //
+    // 下面这组变量只是「兜底值」，真实取值由 menu.vue 的 :style="sidebarStyleVars"
+    // 按密度档位（compact / regular / relaxed）写到行内样式上，行内样式优先级更高。
+    // 兜底值存在的意义：JS 还没跑起来的那一帧、或被样式隔离的环境里也不至于错位。
+    --sidebar-inset-x: 12px;
     --sidebar-icon-size: 18px;
     --sidebar-channel-icon: 14px;
     --sidebar-icon-gap: 8px;
-    --sidebar-text-inset: calc(var(--sidebar-inset-x) + var(--sidebar-icon-size) + var(--sidebar-icon-gap)); // 36px
+    --sidebar-row-height: 34px;
+    --sidebar-logo-height: 30px;
+    --sidebar-logo-max-width: 148px;
+    --sidebar-section-gap: 16px;
+    // OEM：给 macOS 红黄绿窗口按钮留出的顶部高度。仅桌面端（html.wails-desktop）
+    // 生效，见下方 .aside_box 的 html.wails-desktop 覆盖规则。
+    // 38px ≈ macOS 交通灯按钮中心线 + 上下各约 12px 呼吸，默认窗口下不会压到 Logo。
+    --sidebar-titlebar-h: 38px;
+    // OEM：交通灯中心线距窗口顶部的距离（pt）。
+    // 决定 .sidebar_winctl 里折叠/搜索按钮的垂直位置——调到它就能让按钮
+    // 与系统红黄绿按钮落在同一条水平线上（大 ⇒ 按钮下移）。
+    //
+    // 26px 是对真机窗口截图做像素测量得到的值（不是按 macOS 文档推算的）：
+    //   截图上红绿灯落在像素 y=40..63（@2x），换算 CSS = 20..31.5，中心 25.75。
+    // Windows 的交通灯并非贴顶，而是从 y≈20 才开始，所以理论值 16 会偏高、
+    // 48 会偏低，实测 26 才是真正对齐的那条线。
+    --sidebar-winctl-center: 26px;
+    --sidebar-text-inset: calc(var(--sidebar-inset-x) + var(--sidebar-icon-size) + var(--sidebar-icon-gap));
 
     min-width: 0;
     width: var(--sidebar-width, 260px);
@@ -1314,9 +1581,14 @@ const resizeSidebar = (delta: number, keyboard: boolean) => {
     transition: width 0.25s ease, min-width 0.25s ease;
     position: relative;
 
-    // macOS Wails 桌面：红绿灯位于 HiddenInset 标题栏区域，需让出顶部空间
+    // OEM：内嵌标题栏（mac.TitleBarHiddenInset）下，红黄绿窗口按钮由系统绘制在
+    // 窗口左上角、浮在 webview 之上。这里不再靠整条 padding-top 让位，
+    // 而是让 .sidebar_winctl 这个专门的行去避开红绿灯（见下方），
+    // 从而把「红绿灯同一行」的右侧空白利用起来放折叠/搜索按钮。
+    // 折叠态没有这一行（红绿灯位置本来就是空的），所以仍然整条下移。
+    // 若改回原生标题栏（TitleBarDefault），把 --sidebar-titlebar-h 设为 0 即可。
     html.wails-desktop & {
-        padding-top: 30px;
+        padding-top: 0;
     }
 
     &--resizing {
@@ -1328,6 +1600,39 @@ const resizeSidebar = (delta: number, keyboard: boolean) => {
         width: 48px;
         padding: 8px 0;
         overflow: visible;
+
+        // OEM：折叠态没有 .sidebar_winctl（窄到放不下按钮，红绿灯位置本就是空的），
+    // 所以这里仍然整条下移，避免首个图标被红黄绿按钮压住。
+    //
+    // 桌面端折叠宽度按「红黄绿按钮带」取 76px（不是浏览器的 48px）：
+    //   · 系统按钮占窗口左上 ≈76x28，竖排图标居中于这 76px，和红黄绿在同一竖条里；
+    //   · 右边缘正好落在按钮带右侧，右侧内容（标题、页面 header）不会再被压住，
+    //     也不再需要给每个页面单独加左侧让位。
+    // JS 里的 SIDEBAR_COLLAPSED_WIDTH 仍是 48（浏览器 / Web 形态），
+    // 只有桌面端通过 html.wails-desktop 覆盖；--sidebar-width 变量只被 .aside_box 自己读，
+    // 不会和这里打架。
+    html.wails-desktop & {
+        // 桌面端折叠宽度取 92px：左右对称留白，内容中心正好落在 46px —— 就是 macOS
+        // 红黄绿按钮带的中心（展开态 .sidebar_winctl 的 spacer 是 76px：左 20 + 三颗 12
+        // + 两处 8，按钮带 20..72，中心 46）。所以竖排图标和红黄绿在同一条竖线上，
+        // 同时右侧多出 20px 余量，内容区（从 92px 起）不再紧贴按钮带。
+        min-width: 92px;
+        width: 92px;
+        padding: var(--sidebar-titlebar-h, 38px) 0 6px;
+
+        // 折叠态图标放大一档：16px 在 92px 栏里显得空，20px 与展开态视觉重量相当
+        --sidebar-icon-size: 20px;
+
+        .menu_item {
+            width: 36px;
+            height: 36px;
+            margin: 0 auto 8px;
+        }
+
+        .menu_bottom {
+            padding: 4px 0 8px;
+        }
+    }
 
         .menu_box {
             align-items: center;
@@ -1356,12 +1661,56 @@ const resizeSidebar = (delta: number, keyboard: boolean) => {
             border-radius: var(--app-radius-sm);
         }
 
-        .menu_bottom {
-            align-items: center;
-        }
         .menu_top {
             margin-right: 0;
             padding-right: 0;
+        }
+    }
+
+    /* OEM：窗口控制条 —— 只在内嵌标题栏 + 展开态渲染。
+       自身高度 = 红绿灯带高度（--sidebar-titlebar-h），左侧 spacer 让开系统按钮，
+       右侧放折叠/搜索图标。鼠标可拖动窗口（系统按钮区域由 noDragSel 排除）。 */
+    .sidebar_winctl {
+        display: flex;
+        // 本行的垂直几何按 macOS 交通灯位置来定（真机实测值，见 .aside_box 的
+        // --sidebar-winctl-center）。
+        //
+        // 不用 align-items:center 让按钮随行居中：交通灯中心线并不在行高中点，
+        // 居中会让按钮与红绿灯错位（真机实测偏高）。改用 align-items:flex-start
+        // + 显式 padding-top 把按钮中心压到交通灯中心线上：
+        //   按钮中心 = padding-top + 按钮高/2 = (center - 14) + 14 = center
+        align-items: flex-start;
+        justify-content: flex-end;
+        // 行高必须容得下「按钮中心 = winctl-center」：
+        //   center - 14 (按钮高一半) + 28 (按钮高) + 4 (下呼吸) = center + 18
+        // 只写死 38px 的话，center=48 时按钮会溢出到下方 logo 行上。
+        // 这里用 max() 取「标题栏带高度」和「按钮实际所需高度」的较大值：
+        //   · center=16 时 → max(38, 16+18=34) = 38（保持原布局）
+        //   · center=48 时 → max(38, 48+18=66) = 66（自动加高，不压 logo）
+        min-height: var(--sidebar-titlebar-h, 38px);
+        height: max(var(--sidebar-titlebar-h, 38px), calc(var(--sidebar-winctl-center, 48px) + 18px));
+        padding-top: calc(var(--sidebar-winctl-center, 48px) - 14px);
+        // 必须是 0 0 auto：flex 纵向容器里 flex-grow 会拉伸高度，
+        // 写 flex:1 1 auto 时 height 会被忽略、这一行被撑到 300px+（实测踩过）。
+        flex: 0 0 auto;
+        // 桌面端 .aside_box 的 padding-top 被设为 0（见上方 html.wails-desktop 覆盖），
+        // 所以这里不需要负 margin 抵消；加了反而会把整行顶出窗口上边缘。
+        margin: 0 0 var(--sidebar-subgap, 8px) 0;
+        padding-right: 2px;
+        box-sizing: border-box;
+        // 内嵌标题栏下 webview 铺满窗口，这一条的空白处要能拖动窗口。
+        // 按钮容器单独排除，否则点不动。
+        -webkit-app-region: drag;
+
+        // spacer：让开 macOS 红黄绿三颗按钮（系统绘制在 webview 之上）
+        // 76px ≈ 左内边距 20 + 三颗 12px 按钮 + 两处 8px 间距 + 右侧留白
+        &__spacer {
+            flex: 0 0 auto;
+            width: 76px;
+        }
+
+        .logo_actions {
+            -webkit-app-region: no-drag;
         }
     }
 
@@ -1369,9 +1718,12 @@ const resizeSidebar = (delta: number, keyboard: boolean) => {
         display: flex;
         align-items: center;
         justify-content: space-between;
-        // 保留侧栏顶部留白，让 Logo 和操作按钮与窗口顶边保持舒适间距
-        height: 39px;
-        margin: 0 0 4px;
+        gap: var(--sidebar-icon-gap);
+        // 高度由 Logo 实际高度 + 上下呼吸空间决定，不再写死 39px。
+        // 旧写法的问题：Logo 是竖版图，按 width:108px 反推出 96px 高，
+        // 塞进固定 39px 的容器里会被 overflow:hidden 裁掉，只剩图标顶部一截。
+        min-height: calc(var(--sidebar-logo-height) + 16px);
+        margin: 0 0 var(--sidebar-subgap, 8px);
         flex-shrink: 0;
         padding: 0 2px 0 var(--sidebar-inset-x);
     }
@@ -1400,11 +1752,82 @@ const resizeSidebar = (delta: number, keyboard: boolean) => {
         align-items: center;
         flex: 1;
         min-width: 0;
-        overflow: hidden;
+        // 不再裁切：Logo 高度已经受控，溢出属于配置错误，应暴露而不是静默吃掉
+        overflow: visible;
 
-        .logo {
-            width: 108px;
-            height: auto;
+        /*
+         * 圆形 badge：品牌图标的正圆容器。
+         *
+         * 尺寸只由 --sidebar-logo-height 决定（各密度档位 30/34/38px），
+         * 宽高强制相等才能是正圆——不能靠素材比例，否则换图就变椭圆。
+         * 白底 + 1px 描边托住透明边角；描边用 --td-component-stroke，
+         * 深浅色模式自动跟随。图案用 contain 居中缩放，任何比例都不变形。
+         */
+        .logo-badge {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            flex-shrink: 0;
+            width: var(--sidebar-logo-height);
+            height: var(--sidebar-logo-height);
+            border-radius: 50%;
+            overflow: hidden;
+            background: var(--td-bg-color-container);
+            border: 1px solid var(--td-component-stroke);
+            box-sizing: border-box;
+
+            &__img {
+                width: 100%;
+                height: 100%;
+                object-fit: contain;
+                display: block;
+                /* 图案本身留白不多，稍放大以贴合圆形边缘，避免看起来"缩成一团" */
+                transform: scale(1.08);
+            }
+
+            // 图片加载失败：用品牌首字兜底，保持圆形轮廓不变
+            &--fallback {
+                font-size: calc(var(--sidebar-logo-height) * 0.44);
+                font-weight: 700;
+                color: var(--td-brand-color);
+                letter-spacing: 0;
+            }
+        }
+
+        // 产品名：与图标垂直居中对齐，字号跟随侧栏密度
+        .logo-name {
+            margin-left: 8px;
+            font-size: var(--app-text-md);
+            font-weight: 700;
+            letter-spacing: 0.2px;
+            color: var(--td-text-color-primary);
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            min-width: 0;
+            flex-shrink: 1;
+
+            // 品牌名 + 版本号纵向两行：横向并排会把品牌名挤成「知识工...」
+            // （实测可用宽度只有 62px，而文字本身需要 66px）
+            display: flex;
+            flex-direction: column;
+            align-items: flex-start;
+            justify-content: center;
+            line-height: 1.25;
+
+            &__text {
+                max-width: 100%;
+                overflow: hidden;
+                text-overflow: ellipsis;
+            }
+
+            // 版本号放在第二行，弱化成辅助信息，不抢品牌名的视觉权重
+            &__version {
+                font-size: 11px;
+                font-weight: 400;
+                letter-spacing: 0;
+                color: var(--td-text-color-placeholder);
+            }
         }
 
         .lite-badge {
@@ -1426,6 +1849,12 @@ const resizeSidebar = (delta: number, keyboard: boolean) => {
         overflow-y: auto;
         overflow-x: hidden;
         min-height: 0;
+        // 菜单区与上方（Logo / 空间选择器）之间留出档位化的间距，
+        // 原来 4-6px 在信息密集时显得挤，宽屏又过于紧凑。
+        // 注意：这里只管「项与项」的微间距——分组间距不要加在 .menu_box 上，
+        // 因为每个菜单项本身也是一个 .menu_box，那样会让三个菜单项之间各多出
+        // 一个 section-gap（实测间距从 1px 变成 19px）。
+        gap: 2px;
         // 抵消 .aside_box 的右内边距，让滚动条贴近面板右缘；
         // 等量 padding 补回，保证列表文字位置不变。
         margin-right: -4px;
@@ -1467,6 +1896,7 @@ const resizeSidebar = (delta: number, keyboard: boolean) => {
         flex-shrink: 0;
         display: flex;
         flex-direction: column;
+        padding: 4px 8px 8px;
     }
 
     .menu_box {
@@ -1511,7 +1941,8 @@ const resizeSidebar = (delta: number, keyboard: boolean) => {
         display: flex;
         align-items: center;
         justify-content: space-between;
-        height: 34px;
+        // 行高走密度变量：窄屏自动收紧，避免菜单区把会话列表挤没
+        height: var(--sidebar-row-height);
         padding: 6px 8px 6px var(--sidebar-inset-x);
         box-sizing: border-box;
         margin-bottom: 1px;
@@ -1545,17 +1976,24 @@ const resizeSidebar = (delta: number, keyboard: boolean) => {
         color: var(--td-text-color-secondary);
 
         .icon {
-            width: 18px;
-            height: 18px;
+            // 尺寸兜底修正：原来这里写死 18px，导致改 --sidebar-icon-size 时
+            // 容器缩了而图标没缩，出现「图标顶到边框」的观感。
+            // 现在两者都读同一个变量，并彼此封顶，永不溢出容器。
+            width: var(--sidebar-icon-size);
+            height: var(--sidebar-icon-size);
+            max-width: 100%;
+            max-height: 100%;
             overflow: hidden;
+            flex-shrink: 0;
         }
 
         // 图形几乎占满画布的图标缩小显示，否则会比其他图标大一圈
         &.menu_icon--zhishiku .icon,
         &.menu_icon--organization .icon,
         .icon.icon--toggle {
-            width: 16px;
-            height: 16px;
+            // 收缩量按比例算（-2px 对应 18px 档的 16px），换档位时依然协调
+            width: calc(var(--sidebar-icon-size) - 2px);
+            height: calc(var(--sidebar-icon-size) - 2px);
         }
     }
 
@@ -1569,7 +2007,9 @@ const resizeSidebar = (delta: number, keyboard: boolean) => {
         line-height: 20px;
         overflow: hidden;
         white-space: nowrap;
-        max-width: 120px;
+        // 上限跟着侧栏可用宽度走，窄屏时不至于把「知识库」也截成「知…」
+        max-width: 100%;
+        min-width: 0;
         flex: 1;
     }
 
@@ -1663,6 +2103,87 @@ const resizeSidebar = (delta: number, keyboard: boolean) => {
 
     .timeline_header-label {
         white-space: nowrap;
+    }
+
+    // 项目区：紧跟在「系统设置」菜单项之后，但与上面几个功能项是不同性质的
+    // 内容（功能入口 vs 资源树），所以用「分隔线 + 上下大留白」明确分成两块，
+    // 避免项目标题被误认成又一个菜单项。
+    .menu_box--projects {
+        padding: 0 var(--menu-item-inline-pad, 10px) 6px;
+    }
+
+    // 功能项与项目区之间的分隔线。左右各内缩 6px，让线不比菜单项宽，
+    // 看起来是「分组线」而不是表格边框。
+    .menu_box__divider {
+        height: 1px;
+        margin: 12px 6px 14px;
+        background: var(--td-component-stroke);
+    }
+
+    // 项目内的会话行：作为二级层级，字号与颜色都明显弱于项目名（13px/primary），
+    // 靠「更小字号 + 更浅颜色 + 缩进」三重信号表达从属关系，而不是只靠缩进。
+    .project-sessions-slot {
+        display: flex;
+        flex-direction: column;
+        gap: 1px;
+        // 上方不留空：紧接目录行，让「项目名 → 目录 → 会话」读作一个整体
+        padding: 2px 0 4px;
+    }
+
+    // 缩进跟随项目名的文字列（行内 2px + 图标槽 + 间距），再多 8px 作为
+    // 「我是子项」的从属暗示。项目行图标槽与主菜单同档（--sidebar-icon-size），
+    // 所以这里的缩进会随侧栏密度自动变化，不需要改魔数。
+    .project-session-row .session-list-row {
+        padding-left: calc(10px + var(--sidebar-icon-size, 18px) + var(--sidebar-icon-gap, 8px));
+        padding-right: 6px;
+    }
+
+    // 会话行高度与字号：比历史列表（34px/14px）更矮更小，读起来是「子项」。
+    // 注意特异性：基础规则写的是 ".submenu_item_p.session-chat-row .session-list-row"
+    // （高度 34px）与 ":deep(.submenu_item)"（字号 14px），两处都是 (0,3,0) 级别，
+    // 所以这里必须同带 .submenu_item_p 才压得住，光写 .project-session-row 会被盖回去。
+    .submenu_item_p.project-session-row.session-chat-row {
+        margin-bottom: 0;
+        margin-top: 0;
+
+        > .session-list-row {
+            height: 28px;
+            border-radius: var(--app-radius-sm);
+        }
+
+        :deep(.submenu_item),
+        :deep(.submenu_title-text) {
+            // 13px：比一级项（14px）小一档，仍是能舒服阅读的正文字号，
+            // 与项目名的 14px 形成清晰的一级/二级关系而不至于碎得看不清。
+            font-size: var(--app-text-md);
+            line-height: 20px;
+            color: var(--td-text-color-secondary);
+        }
+
+        // 运行中/未读小圆点也缩小一档，跟着字号一起降级，否则圆点会把行撑高
+        :deep(.session-row-badge) {
+            transform: scale(0.9);
+            transform-origin: center right;
+        }
+
+        // 当前打开的会话在项目内也要能一眼认出来
+        &.session-chat-row--active > .session-list-row {
+            background: var(--td-bg-color-container-hover);
+
+            :deep(.submenu_item),
+            :deep(.submenu_title-text) {
+                color: var(--td-brand-color);
+                font-weight: 500;
+            }
+        }
+    }
+
+    .project-sessions-empty {
+        // 与上面会话文字同列，让「暂无对话」落在子项那一列而不是另起一块
+        padding: 2px 6px 2px calc(12px + var(--sidebar-icon-size, 18px) + var(--sidebar-icon-gap, 8px));
+        font-size: var(--app-text-md);
+        line-height: 20px;
+        color: var(--td-text-color-placeholder);
     }
 
     // Stable filter control: always mounted and absolutely pinned to the list's
