@@ -165,7 +165,16 @@ if [[ "${GOOS_TARGET}" == windows ]]; then
     shim_dir="${TOOLS_ROOT}/cgo-include"
     mkdir -p "${shim_dir}"
     printf '#include "sqlite3-binding.h"\n' > "${shim_dir}/sqlite3.h"
-    export CGO_CFLAGS="${CGO_CFLAGS:-} -I${shim_dir} -I${mattn_dir}"
+    # -I 的路径必须是 gcc 能认的形式：MinGW/UCRT64 的 gcc 不认 MSYS 的 /d/a/...
+    # （实测 "sqlite3.h: No such file or directory"），用 cygpath -m 换成
+    # D:/a/... 这种混写形式；非 MSYS 环境（macOS/Linux）没有 cygpath，原样用。
+    shim_flag_dir="${shim_dir}"
+    mattn_flag_dir="${mattn_dir}"
+    if command -v cygpath >/dev/null 2>&1; then
+      shim_flag_dir="$(cygpath -m "${shim_dir}")"
+      mattn_flag_dir="$(cygpath -m "${mattn_dir}")"
+    fi
+    export CGO_CFLAGS="${CGO_CFLAGS:-} -I${shim_flag_dir} -I${mattn_flag_dir}"
     echo "  sqlite3 垫片：${shim_dir}/sqlite3.h（mattn 头文件在 ${mattn_dir}）"
   else
     echo "✗ 无法定位 github.com/mattn/go-sqlite3（需要它提供 sqlite3-binding.h）" >&2
