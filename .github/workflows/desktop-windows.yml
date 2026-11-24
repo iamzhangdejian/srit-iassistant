@@ -40,6 +40,10 @@ jobs:
       MINGW_CC: gcc
       MINGW_CXX: g++
       GOLANG_PROTOBUF_REGISTRATION_CONFLICT: warn
+      # Windows runner 默认 Node 堆上限约 2GB，vite 打包这份前端会 OOM
+      # （实测 "FATAL ERROR: Reached heap limit"）。wails build 内部也会调 vite，
+      # 所以放在 job 级 env，两步都吃得到。
+      NODE_OPTIONS: "--max-old-space-size=6144"
     steps:
       - uses: actions/checkout@v6
 
