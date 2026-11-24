@@ -255,10 +255,18 @@ fi
 # -m 跳过 wails 内部的 go mod tidy：本仓库把 GOMODCACHE 放在 <repo>/tools/ 下，
 # 而 go mod tidy 会把 module cache 里的目录当成模块内的包来遍历，报
 # "import path ... should not have @version"。go.mod 本身完整，无需 tidy。
+# -skipembedcreate 关掉 wails 的 go:embed 目录扫描：它内部用
+# golang.org/x/tools/go/packages 以 `./...` 加载整个工程做类型检查，既不看
+# `-tags`（desktop/production 等被排除的文件会让包类型不完整），也不带目标平台
+# 的 cgo 环境，在 Windows 上必然以
+# `internal error: package "github.com/neo4j/neo4j-go-driver/v6/neo4j" without types
+# was imported from ".../internal/container"` 收场。本仓库的 embed 目标
+# （VERSION.embedded、frontend/dist）在构建前都已存在，不需要它创建。
 wails build \
   -m \
   -clean \
   -skipbindings \
+  -skipembedcreate \
   -tags "${BUILD_TAGS}" \
   -platform "${TARGET_PLATFORM}" \
   ${NSIS_FLAG:+"${NSIS_FLAG}"} \
