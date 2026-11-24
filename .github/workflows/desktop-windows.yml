@@ -60,6 +60,7 @@ jobs:
       # runner 自带的 mingw 未必满足（Chocolatey 的 mingw 是 MSVCRT/win32），
       # 所以显式装 MSYS2 的 UCRT64 工具链并把它放到 PATH 最前面。
       - uses: msys2/setup-msys2@v2
+        id: msys2
         with:
           msystem: UCRT64
           update: false
@@ -68,8 +69,18 @@ jobs:
       - name: Use UCRT64 toolchain
         shell: bash
         run: |
-          echo "C:\\msys64\\ucrt64\\bin" >> "$GITHUB_PATH"
-          export PATH="/c/msys64/ucrt64/bin:$PATH"
+          # setup-msys2 的安装位置随 runner 变化（D:\a\_temp\setup-msys2 或 C:\msys64），
+          # 不能写死。用 action 的输出定位，再把 ucrt64/bin 前置到 PATH。
+          MSYS2_ROOT="${{ steps.msys2.outputs.msys2-location }}"
+          echo "msys2 root: $MSYS2_ROOT"
+          ls "$MSYS2_ROOT/ucrt64/bin/gcc.exe" || {
+            echo "::error::找不到 $MSYS2_ROOT/ucrt64/bin/gcc.exe"
+            exit 1
+          }
+          echo "$MSYS2_ROOT/ucrt64/bin" >> "$GITHUB_PATH"
+
+          export PATH="$MSYS2_ROOT/ucrt64/bin:$PATH"
+          which gcc
           gcc -dumpmachine
           gcc -v 2>&1 | grep -E "Thread model|gcc version" | head -2
           # UCRT 工具链会定义 _UCRT；MSVCRT 不会。这里硬性把关，免得后面收一堆看不懂的链接错误。
@@ -77,6 +88,7 @@ jobs:
             echo "::error::当前 gcc 不是 UCRT 目标（详见脚本注释）；duckdb 预编译库要求 UCRT64"
             exit 1
           fi
+          echo "UCRT toolchain ready"
 
       - name: Install Wails CLI
         shell: bash
