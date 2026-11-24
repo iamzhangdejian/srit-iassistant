@@ -1,0 +1,23 @@
+{
+  "$schema": "https://wails.io/schemas/config.v2.json",
+  "name": "国研智研体",
+  "outputfilename": "国研智研体",
+  "frontend:dir": "../../frontend",
+  "wailsjsdir": "../../frontend/src",
+  "build:tags": "desktop",
+  "author": {
+    "name": "国研智研体",
+    "email": ""
+  },
+  "info": {
+    "companyName": "国研智研体",
+    "productName": "国研智研体",
+    "productVersion": "0.9.0",
+    "copyright": "Copyright 2026",
+    "comments": "国研智研体 桌面版"
+  },
+  "mac": {
+    "category": "public.app-category.productivity",
+    "titlebar": "hiddenInset"
+  }
+}
