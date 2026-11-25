@@ -158,38 +158,25 @@ jobs:
           thread_local void* __once_callable = nullptr;
           }
           CPP
-          if ! g++ -O2 -fPIC -c "$dir/once_shim.cc" -o "$dir/once_shim.o" 2>"$dir/shim.err"; then
-            echo "::warning::__once_call 兼容层编译失败（可能 GCC 头文件已声明同名变量），跳过"
+          shim_ok=1
+          if ! g++ -O2 -c "$dir/once_shim.cc" -o "$dir/once_shim.o" 2>"$dir/shim.err"; then
+            echo "::warning::__once_call 兼容层编译失败，跳过"
             sed -n '1,20p' "$dir/shim.err" || true
-            : > "$dir/once_shim.o"
+            shim_ok=0
           fi
-          if [ -s "$dir/once_shim.o" ]; then ar rcs "$dir/libwincompat.a" "$dir/once_shim.o"; fi
           extra=""
-          if [ -s "$dir/once_shim.o" ]; then extra="$(cygpath -m "$dir") -lwincompat"; fi
-          # 逐个探测导入库是否真的提供 WaitOnAddress 等符号
-          cat > "$dir/probe.c" <<'C'
-          #include <windows.h>
-          #include <synchapi.h>
-          int main(void) {
-            LONG v = 0;
-            WaitOnAddress(&v, &v, sizeof(v), 1);
-            WakeByAddressSingle(&v);
-            WakeByAddressAll(&v);
-            return 0;
-          }
-          C
-          if gcc "$dir/probe.c" -o "$dir/probe.exe" -lsynchronization >/dev/null 2>&1; then
-            extra="$extra -lsynchronization"
-          else
-            echo "::warning::-lsynchronization 不可用，WaitOnAddress 可能仍缺"
+          if [ "$shim_ok" = 1 ]; then
+            ar rcs "$dir/libwincompat.a" "$dir/once_shim.o"
+            ls -l "$dir/libwincompat.a"
+            extra="-L$(cygpath -m "$dir") -lwincompat"
           fi
-          for lib in ntdll mingwex ws2_32 rstrtmgr ole32 userenv; do
-            if gcc "$dir/probe.c" -o "$dir/probe.exe" -l"$lib" >/dev/null 2>&1; then
-              extra="$extra -l$lib"
-            fi
+          # 导入库按「文件是否真的存在」挑选（不靠符号探测）
+          for lib in synchronization ntdll mingwex ws2_32 rstrtmgr ole32 userenv bcrypt shlwapi winpthread; do
+            f="$(gcc -print-file-name=lib$lib.a)"
+            if [ -f "$f" ]; then extra="$extra -l$lib"; else echo "  （无 lib$lib.a，跳过）"; fi
           done
           echo "→ 链接兼容参数：${extra:-（无）}"
-          echo "CGO_LDFLAGS=${CGO_LDFLAGS:-} ${extra}" >> "$GITHUB_ENV"
+          echo "CGO_LDFLAGS=${extra}" >> "$GITHUB_ENV"
 
       - name: Build desktop app
         shell: bash
