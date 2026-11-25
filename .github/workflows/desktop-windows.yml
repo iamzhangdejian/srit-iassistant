@@ -138,6 +138,59 @@ jobs:
           npm ci --no-audit --no-fund || npm install --no-audit --no-fund
           npm run build
 
+      # duckdb-go-bindings 的 Windows 预编译库是拿较老的 mingw GCC 编的：
+      # 里面的 std::call_once 内联代码引用 std::__once_call / __once_callable
+      # 这两个 emutls 变量，而 UCRT64 的 libstdc++（GCC 16）已不再定义它们，
+      # 于是链接期报 undefined reference to `__emutls_v._ZSt11__once_call`。
+      # 同时 rayon（anydoc）与 re2 需要 WaitOnAddress/WakeByAddress*、ntdll 系列
+      # 导入库。这一步把两件事都补上，产物只在链接期用到，不影响运行时语义。
+      - name: Windows link compat libs
+        shell: bash
+        run: |
+          set -euo pipefail
+          dir="$(pwd)/tools/wincompat"
+          mkdir -p "$dir"
+          cat > "$dir/once_shim.cc" <<'CPP'
+          // 老 ABI 的 std::call_once 支撑变量（libstdc++ <= 13 里有）。
+          #include <cstddef>
+          namespace std {
+          thread_local void* __once_call = nullptr;
+          thread_local void* __once_callable = nullptr;
+          }
+          CPP
+          if ! g++ -O2 -fPIC -c "$dir/once_shim.cc" -o "$dir/once_shim.o" 2>"$dir/shim.err"; then
+            echo "::warning::__once_call 兼容层编译失败（可能 GCC 头文件已声明同名变量），跳过"
+            sed -n '1,20p' "$dir/shim.err" || true
+            : > "$dir/once_shim.o"
+          fi
+          if [ -s "$dir/once_shim.o" ]; then ar rcs "$dir/libwincompat.a" "$dir/once_shim.o"; fi
+          extra=""
+          if [ -s "$dir/once_shim.o" ]; then extra="$(cygpath -m "$dir") -lwincompat"; fi
+          # 逐个探测导入库是否真的提供 WaitOnAddress 等符号
+          cat > "$dir/probe.c" <<'C'
+          #include <windows.h>
+          #include <synchapi.h>
+          int main(void) {
+            LONG v = 0;
+            WaitOnAddress(&v, &v, sizeof(v), 1);
+            WakeByAddressSingle(&v);
+            WakeByAddressAll(&v);
+            return 0;
+          }
+          C
+          if gcc "$dir/probe.c" -o "$dir/probe.exe" -lsynchronization >/dev/null 2>&1; then
+            extra="$extra -lsynchronization"
+          else
+            echo "::warning::-lsynchronization 不可用，WaitOnAddress 可能仍缺"
+          fi
+          for lib in ntdll mingwex ws2_32 rstrtmgr ole32 userenv; do
+            if gcc "$dir/probe.c" -o "$dir/probe.exe" -l"$lib" >/dev/null 2>&1; then
+              extra="$extra -l$lib"
+            fi
+          done
+          echo "→ 链接兼容参数：${extra:-（无）}"
+          echo "CGO_LDFLAGS=${CGO_LDFLAGS:-} ${extra}" >> "$GITHUB_ENV"
+
       - name: Build desktop app
         shell: bash
         run: bash scripts/oem-build-lite.sh
