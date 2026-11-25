@@ -292,7 +292,11 @@ SectionEnd
 "@
 
 $nsiPath = Join-Path $stage "installer.nsi"
-Set-Content -Path $nsiPath -Value $nsi -Encoding UTF8
+# NSIS 在 `Unicode true` 下按 UTF-8 **BOM** 识别脚本编码。PowerShell 7 的
+# `-Encoding UTF8` 不写 BOM，脚本里的中文（OutFile 文件名、产品名、卸载文案）
+# 会被当成 ANSI 读，产物名变成「å›½ç ”æ™ºç ”ä½“…」这种乱码、Test-Path 也
+# 匹配不到自己的产物。这里显式写带 BOM 的 UTF-8。
+[System.IO.File]::WriteAllText($nsiPath, $nsi, (New-Object System.Text.UTF8Encoding($true)))
 
 # ── 3. 编译安装包 ──────────────────────────────────────────────────────
 Write-Host "→ 编译 NSIS 安装包"
@@ -312,6 +316,17 @@ if ($makensisExit -ne 0) {
     Write-Error "makensis 失败（退出码 $makensisExit）"
     exit $makensisExit
 }
+if (-not (Test-Path $out)) {
+    # 兜底：极端情况下 NSIS 仍可能把中文名写成别的编码，按「最新 Setup.exe」捞回来改名。
+    $binDir = Split-Path $outAbs -Parent
+    $loose = Get-ChildItem (Join-Path $binDir "*Setup.exe") -ErrorAction SilentlyContinue |
+             Sort-Object LastWriteTime -Descending | Select-Object -First 1
+    if ($loose -and $loose.FullName -ne $outAbs) {
+        Move-Item -Force $loose.FullName $outAbs
+        Write-Host "  · 已修正安装包文件名：$($loose.Name) → $([System.IO.Path]::GetFileName($outAbs))"
+    }
+}
+
 if (Test-Path $out) {
     $size = [math]::Round((Get-Item $out).Length / 1MB, 1)
     Write-Host "✓ Windows 打包完成：$out（$size MB）"
