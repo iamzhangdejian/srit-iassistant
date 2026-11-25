@@ -111,7 +111,11 @@ jobs:
 
       - name: Install NSIS
         shell: bash
-        run: choco install nsis -y --no-progress
+        run: |
+          choco install nsis -y --no-progress
+          # choco 装的 makensis 不在默认 PATH 里，脚本探测不到就只出 exe 不出安装包
+          echo "C:/Program Files (x86)/NSIS" >> "$GITHUB_PATH"
+          ls "/c/Program Files (x86)/NSIS/makensis.exe" || true
 
       - name: Install Rust + windows-gnu target
         shell: bash

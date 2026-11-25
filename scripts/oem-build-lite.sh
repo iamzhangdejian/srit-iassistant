@@ -278,6 +278,14 @@ fi
 # `internal error: package "github.com/neo4j/neo4j-go-driver/v6/neo4j" without types
 # was imported from ".../internal/container"` 收场。本仓库的 embed 目标
 # （VERSION.embedded、frontend/dist）在构建前都已存在，不需要它创建。
+# Windows 上把中文名传给 wails 的 -o 不可靠（Git-Bash → Go 参数编码），
+# 所以先编成 ASCII 名，再在下面改名成品牌名。macOS/Linux 仍直接用品牌名。
+if [[ "${TARGET_PLATFORM}" == windows* ]]; then
+  OUT_NAME="weknora-desktop-tmp"
+else
+  OUT_NAME="${APP_NAME}"
+fi
+
 wails build \
   -m \
   -clean \
@@ -287,7 +295,18 @@ wails build \
   -platform "${TARGET_PLATFORM}" \
   ${NSIS_FLAG:+"${NSIS_FLAG}"} \
   -ldflags="${LDFLAGS}" \
-  -o "${APP_NAME}"
+  -o "${OUT_NAME}"
+
+if [[ "${TARGET_PLATFORM}" == windows* ]]; then
+  built_exe="cmd/desktop/build/bin/${OUT_NAME}.exe"
+  if [[ -f "${built_exe}" ]]; then
+    mv -f "${built_exe}" "cmd/desktop/build/bin/${APP_NAME}.exe"
+    echo "→ 已重命名为 ${APP_NAME}.exe"
+  else
+    echo "✗ 未找到 ${built_exe}；bin 目录当前内容：" >&2
+    ls -l cmd/desktop/build/bin 2>/dev/null >&2 || echo "  （目录不存在）" >&2
+  fi
+fi
 
 popd >/dev/null
 
@@ -317,4 +336,8 @@ echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo " 构建完成，产物："
 find cmd/desktop/build/bin -maxdepth 2 \( -name "*.app" -o -name "*.exe" -o -name "*.AppImage" -o -name "*.dmg" -o -name "*.deb" \) -print 2>/dev/null | sed 's/^/   /'
+# 万一 find 什么都没匹配到，把目录本身打出来，便于定位产物去哪了
+if ! find cmd/desktop/build/bin -maxdepth 2 -name "*.exe" -print -quit 2>/dev/null | grep -q .; then
+  ls -l cmd/desktop/build/bin 2>/dev/null | sed 's/^/   /' || echo "   （cmd/desktop/build/bin 不存在）"
+fi
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
