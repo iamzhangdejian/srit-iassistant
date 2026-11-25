@@ -141,6 +141,31 @@ if ($webview2 -and (Test-Path $webview2)) {
     Write-Host "  ✓ 已内置 WebView2 引导安装器"
 }
 
+# 兜底：万一静态链接没生效（换成别的工具链时会发生），把 MinGW 运行时 DLL
+# 一起装进安装目录。缺了它们，exe 双击只会弹「找不到 libstdc++-6.dll」。
+$mingwBin = $null
+foreach ($cand in @($env:MINGW_PREFIX, "C:\msys64\ucrt64")) {
+    if ($cand) {
+        $binDir = Join-Path $cand "bin"
+        if (Test-Path $binDir) { $mingwBin = $binDir; break }
+    }
+}
+if (-not $mingwBin) {
+    $gccCmd = Get-Command gcc -ErrorAction SilentlyContinue
+    if ($gccCmd) { $mingwBin = Split-Path $gccCmd.Source -Parent }
+}
+if ($mingwBin) {
+    foreach ($dll in @("libstdc++-6.dll", "libgcc_s_seh-1.dll", "libwinpthread-1.dll")) {
+        $dllSrc = Join-Path $mingwBin $dll
+        if (Test-Path $dllSrc) {
+            Copy-Item $dllSrc (Join-Path $stage $dll)
+            Write-Host "  ✓ 附带 MinGW 运行时：$dll"
+        }
+    }
+} else {
+    Write-Warning "未定位到 MinGW 运行时目录，若 exe 仍依赖 libstdc++-6.dll，客户机会启动失败"
+}
+
 $webSrc = Join-Path $repoRoot "frontend\dist"
 if (Test-Path (Join-Path $webSrc "index.html")) {
     Copy-Item $webSrc (Join-Path $stage "web") -Recurse -Force
