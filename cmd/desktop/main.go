@@ -601,7 +601,12 @@ func main() {
 		},
 	})
 	if err != nil {
+		// Windows 是 GUI 子系统，println 无处可去：WebView2 运行时缺失时
+		// wails.Run 就在这里返回，用户看到的就是「双击没反应」。落盘 + 弹窗。
 		println("Error:", err.Error())
+		appendBootLog(execPath, "wails.Run failed: %v", err)
+		notifyBootFailure(execPath, err)
+		os.Exit(1)
 	}
 }
 

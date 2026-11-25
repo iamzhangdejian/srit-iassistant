@@ -4,6 +4,7 @@ package main
 
 import (
 	"fmt"
+	"strings"
 
 	"golang.org/x/sys/windows"
 )
@@ -14,7 +15,12 @@ import (
 // 任何窗口，用户完全无从下手。弹窗里给出日志路径，用户可以直接把文件发回来。
 func notifyBootFailure(execPath string, recovered any) {
 	logPath := bootLogPath(execPath)
-	text := fmt.Sprintf("国研智研体启动失败：\n%v\n\n诊断日志：\n%s", recovered, logPath)
+	hint := ""
+	if strings.Contains(strings.ToLower(fmt.Sprint(recovered)), "webview2") {
+		hint = "\n\n缺少 Microsoft Edge WebView2 运行时。请安装后重试：\n" +
+			"https://go.microsoft.com/fwlink/p/?LinkId=2124703"
+	}
+	text := fmt.Sprintf("国研智研体启动失败：\n%v%s\n\n诊断日志：\n%s", recovered, hint, logPath)
 	caption := "国研智研体"
 
 	textPtr, err := windows.UTF16PtrFromString(text)
