@@ -168,7 +168,12 @@ jobs:
           if [ "$shim_ok" = 1 ]; then
             ar rcs "$dir/libwincompat.a" "$dir/once_shim.o"
             ls -l "$dir/libwincompat.a"
-            extra="-L$(cygpath -m "$dir") -lwincompat"
+            echo "--- libwincompat 定义的符号 ---"
+            nm --defined-only "$dir/libwincompat.a" | sed -n '1,10p'
+            # static 库按命令行顺序解析，而 Go 把 CGO_LDFLAGS 放在对象文件之前，
+            # 直接 -lwincompat 会「先查后引用」导致符号被丢弃，所以用 whole-archive
+            # 强制把 shim 的全部符号带进来。
+            extra="-L$(cygpath -m "$dir") -Wl,--whole-archive -lwincompat -Wl,--no-whole-archive"
           fi
           # 导入库按「文件是否真的存在」挑选（不靠符号探测）
           for lib in synchronization ntdll mingwex ws2_32 rstrtmgr ole32 userenv bcrypt shlwapi winpthread; do
