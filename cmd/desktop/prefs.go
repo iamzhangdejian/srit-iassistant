@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	goruntime "runtime"
 	"strings"
 
 	"github.com/Tencent/WeKnora/internal/localsandbox"
@@ -38,6 +39,13 @@ func desktopConfigDir() (string, error) {
 	// write into the real Application Support directory.
 	if xdg := strings.TrimSpace(os.Getenv("XDG_CONFIG_HOME")); xdg != "" {
 		return xdg, nil
+	}
+	// Windows / Linux 用系统约定的配置目录（%APPDATA%、~/.config），
+	// 别再往 macOS 的 Library 路径里塞。
+	if goruntime.GOOS != "darwin" {
+		if dir, err := os.UserConfigDir(); err == nil && strings.TrimSpace(dir) != "" {
+			return dir, nil
+		}
 	}
 	// 兜底也必须确定：显式拼出 ~/Library/Application Support，与
 	// defaultMacAppSupportDir 保持同一个答案，避免两处各说各话。
