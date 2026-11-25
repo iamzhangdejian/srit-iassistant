@@ -156,6 +156,16 @@ jobs:
       # __emutls_get_address；而 UCRT64 的 GCC 16 用原生 TLS，既没有这两个符号，
       # libgcc 里也没有 emutls 运行时。这里用 UCRT64 的 clang 以同样的
       # -femulated-tls 生成控制块，并显式链接 compiler-rt 的 emutls 运行时。
+      # duckdb-go-bindings 的 Windows 预编译库是用 clang + 「模拟 TLS」(-femulated-tls)
+      # 编出来的：内联的 std::call_once 引用 __emutls_v._ZSt11__once_call /
+      # __emutls_v._ZSt15__once_callable 这两个 emutls 控制块，并调用
+      # __emutls_get_address；而 UCRT64 的 GCC 16 用原生 TLS，既没有这些符号，
+      # libgcc 里也没有 emutls 运行时。这里用 clang 以同样的 -femulated-tls 生成
+      # 控制块，并显式带上 compiler-rt 的 emutls 运行时。
+      #
+      # 注意：CGO_LDFLAGS 会被 Go 在每个 cgo 包上重复展开（本次 18 次），
+      # 所以**不能用 --whole-archive**（同一目标文件被引入多次会报
+      # "multiple definition"）。改用 -l + -Wl,-u,<symbol> 让链接器按需拉取一次。
       - name: Windows link compat libs
         shell: bash
         run: |
@@ -181,48 +191,31 @@ jobs:
             tail -10 /tmp/clang-install.log 2>/dev/null || true
           fi
 
-          shim_ok=0
           clang_bin="$(command -v clang++ || true)"
-          if [ -n "$clang_bin" ]; then
-            echo "clang++: $clang_bin ($("$clang_bin" --version | head -1))"
-            if "$clang_bin" --target=x86_64-w64-windows-gnu -femulated-tls -O2 -c "$dir/once_shim.cc" -o "$dir/once_shim.o" 2>"$dir/shim.err"; then
-              shim_ok=1
-              echo "→ 兼容层用 clang -femulated-tls 生成"
-            else
-              echo "::warning::clang 模拟 TLS 编译失败"
-              sed -n '1,10p' "$dir/shim.err"
-            fi
+          if [ -z "$clang_bin" ]; then
+            echo "::error::没有 clang++，无法生成模拟 TLS 的兼容符号"
+            exit 1
           fi
-          if [ "$shim_ok" = 0 ]; then
-            echo "::warning::退回 g++（原生 TLS，仍会缺 __emutls_v.*）"
-            g++ -O2 -c "$dir/once_shim.cc" -o "$dir/once_shim.o" 2>>"$dir/shim.err" && shim_ok=1
-          fi
+          echo "clang++: $clang_bin ($("$clang_bin" --version | head -1))"
+          "$clang_bin" --target=x86_64-w64-windows-gnu -femulated-tls -O2             -c "$dir/once_shim.cc" -o "$dir/once_shim.o"
+          ar rcs "$dir/libwincompat.a" "$dir/once_shim.o"
+          echo "--- libwincompat 定义的符号 ---"
+          nm --defined-only "$dir/libwincompat.a" | grep -iE "once|emutls" || true
 
-          extra=""
-          if [ "$shim_ok" = 1 ]; then
-            ar rcs "$dir/libwincompat.a" "$dir/once_shim.o"
-            echo "--- libwincompat 定义的符号 ---"
-            nm --defined-only "$dir/libwincompat.a" | grep -i "once\|emutls" || true
-            if nm --defined-only "$dir/libwincompat.a" | grep -q "__emutls_v._ZSt11__once_call"; then
-              echo "✓ 已生成 emutls 控制块"
-            else
-              echo "::warning::兼容层没有 __emutls_v._ZSt11__once_call"
-            fi
-            extra="-L$(cygpath -m "$dir") -Wl,--whole-archive -lwincompat -Wl,--no-whole-archive"
+          # compiler-rt 的 emutls 运行时：用 clang 自己报告 builtins 路径
+          rt="$("$clang_bin" --target=x86_64-w64-windows-gnu -rtlib=compiler-rt -print-libgcc-file-name 2>/dev/null || true)"
+          echo "compiler-rt builtins：${rt:-（未知）}"
+          if [ -n "$rt" ] && [ -f "$rt" ] && nm "$rt" 2>/dev/null | grep -q "__emutls_get_address"; then
+            echo "✓ compiler-rt 含 __emutls_get_address"
+            rt_arg="$(cygpath -m "$rt")"
+          else
+            echo "::error::找不到含 __emutls_get_address 的 compiler-rt，无法满足 duckdb 的 emutls 引用"
+            exit 1
           fi
 
-          # compiler-rt 的 emutls 运行时（模拟 TLS 时 __emutls_get_address 在这里）
-          for rt in "$(dirname "$(command -v gcc)")/../lib/clang/"*/lib/windows/libclang_rt.builtins-x86_64.a \
-                    "$(dirname "$(command -v gcc)")"/../lib/clang/*/lib/windows/libclang_rt.builtins*.a; do
-            if [ -f "$rt" ] && nm "$rt" 2>/dev/null | grep -q "__emutls_get_address"; then
-              echo "→ emutls 运行时：$rt"
-              extra="$extra -Wl,--whole-archive $(cygpath -m "$rt") -Wl,--no-whole-archive"
-              break
-            fi
-          done
-          echo "--- libgcc 是否提供 __emutls_get_address ---"
-          nm "$(gcc -print-file-name=libgcc.a)" 2>/dev/null | grep -w "__emutls_get_address" | head -3 || echo "  （未找到）"
-
+          extra="-L$(cygpath -m "$dir") -lwincompat"
+          extra="$extra -Wl,-u,__emutls_v._ZSt11__once_call -Wl,-u,__emutls_v._ZSt15__once_callable"
+          extra="$extra $rt_arg"
           for lib in synchronization ntdll mingwex ws2_32 rstrtmgr ole32 userenv bcrypt shlwapi winpthread; do
             f="$(gcc -print-file-name=lib$lib.a)"
             if [ -f "$f" ]; then extra="$extra -l$lib"; fi
