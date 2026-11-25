@@ -138,89 +138,20 @@ jobs:
           npm ci --no-audit --no-fund || npm install --no-audit --no-fund
           npm run build
 
-      # duckdb-go-bindings 的 Windows 预编译库是拿较老的 mingw GCC 编的：
-      # 里面的 std::call_once 内联代码引用 std::__once_call / __once_callable
-      # 这两个 emutls 变量，而 UCRT64 的 libstdc++（GCC 16）已不再定义它们，
-      # 于是链接期报 undefined reference to `__emutls_v._ZSt11__once_call`。
-      # 同时 rayon（anydoc）与 re2 需要 WaitOnAddress/WakeByAddress*、ntdll 系列
-      # 导入库。这一步把两件事都补上，产物只在链接期用到，不影响运行时语义。
-      # duckdb-go-bindings 的 Windows 预编译库是用 clang/mingw 且开启「模拟 TLS」
-      # (-femulated-tls) 编出来的：它的 std::call_once 内联代码引用
-      # __emutls_v._ZSt11__once_call / __emutls_v._ZSt15__once_callable 这两个
-      # emutls 控制块，而 UCRT64 的 libstdc++（GCC 16，原生 TLS）不再定义它们。
-      # 因此这里用 clang + -femulated-tls 生成一份**同构**的控制块（布局由编译器
-      # 生成，不手写结构体），再用 whole-archive 强制带进链接。
-      # duckdb-go-bindings 的 Windows 预编译库是用 clang + 「模拟 TLS」(-femulated-tls)
-      # 编出来的：它内联的 std::call_once 引用 __emutls_v._ZSt11__once_call /
-      # __emutls_v._ZSt15__once_callable 这两个 emutls 控制块，并调用
-      # __emutls_get_address；而 UCRT64 的 GCC 16 用原生 TLS，既没有这两个符号，
-      # libgcc 里也没有 emutls 运行时。这里用 UCRT64 的 clang 以同样的
-      # -femulated-tls 生成控制块，并显式链接 compiler-rt 的 emutls 运行时。
-      # duckdb-go-bindings 的 Windows 预编译库是用 clang + 「模拟 TLS」(-femulated-tls)
-      # 编出来的：内联的 std::call_once 引用 __emutls_v._ZSt11__once_call /
-      # __emutls_v._ZSt15__once_callable 这两个 emutls 控制块，并调用
-      # __emutls_get_address；而 UCRT64 的 GCC 16 用原生 TLS，既没有这些符号，
-      # libgcc 里也没有 emutls 运行时。这里用 clang 以同样的 -femulated-tls 生成
-      # 控制块，并显式带上 compiler-rt 的 emutls 运行时。
-      #
-      # 注意：CGO_LDFLAGS 会被 Go 在每个 cgo 包上重复展开（本次 18 次），
-      # 所以**不能用 --whole-archive**（同一目标文件被引入多次会报
-      # "multiple definition"）。改用 -l + -Wl,-u,<symbol> 让链接器按需拉取一次。
-      - name: Windows link compat libs
+      # anydoc 的 windows 静态库（rayon 线程池）引用 WaitOnAddress / WakeByAddress* /
+      # RtlNtStatusToDosError / NtReadFile / NtWriteFile，这些 API 分散在
+      # synchronization / ntdll / mingwex 等导入库里，需要补齐。
+      # （DuckDB 已在 -tags noduckdb 下排除，不再需要 emutls 兼容层。）
+      - name: Windows link libs
         shell: bash
         run: |
           set -euo pipefail
-          dir="$(pwd)/tools/wincompat"
-          mkdir -p "$dir"
-          cat > "$dir/once_shim.cc" <<'CPP'
-          // 老 ABI（libstdc++ <= 13）的 std::call_once 支撑变量。
-          #include <cstddef>
-          namespace std {
-          thread_local void* __once_call = nullptr;
-          thread_local void* __once_callable = nullptr;
-          }
-          CPP
-
-          msys2_root="$(cd "$(dirname "$(command -v gcc)")/../.." && pwd)"
-          pacman_bin="$msys2_root/usr/bin/pacman.exe"
-          echo "msys2 根：$msys2_root"
-          if [ -x "$pacman_bin" ] && "$pacman_bin" -S --noconfirm --needed mingw-w64-ucrt-x86_64-clang >/tmp/clang-install.log 2>&1; then
-            echo "→ clang 已安装"
-          else
-            echo "::warning::clang 安装失败"
-            tail -10 /tmp/clang-install.log 2>/dev/null || true
-          fi
-
-          clang_bin="$(command -v clang++ || true)"
-          if [ -z "$clang_bin" ]; then
-            echo "::error::没有 clang++，无法生成模拟 TLS 的兼容符号"
-            exit 1
-          fi
-          echo "clang++: $clang_bin ($("$clang_bin" --version | head -1))"
-          "$clang_bin" --target=x86_64-w64-windows-gnu -femulated-tls -O2             -c "$dir/once_shim.cc" -o "$dir/once_shim.o"
-          ar rcs "$dir/libwincompat.a" "$dir/once_shim.o"
-          echo "--- libwincompat 定义的符号 ---"
-          nm --defined-only "$dir/libwincompat.a" | grep -iE "once|emutls" || true
-
-          # compiler-rt 的 emutls 运行时：用 clang 自己报告 builtins 路径
-          rt="$("$clang_bin" --target=x86_64-w64-windows-gnu -rtlib=compiler-rt -print-libgcc-file-name 2>/dev/null || true)"
-          echo "compiler-rt builtins：${rt:-（未知）}"
-          if [ -n "$rt" ] && [ -f "$rt" ] && nm "$rt" 2>/dev/null | grep -q "__emutls_get_address"; then
-            echo "✓ compiler-rt 含 __emutls_get_address"
-            rt_arg="$(cygpath -m "$rt")"
-          else
-            echo "::error::找不到含 __emutls_get_address 的 compiler-rt，无法满足 duckdb 的 emutls 引用"
-            exit 1
-          fi
-
-          extra="-L$(cygpath -m "$dir") -lwincompat"
-          extra="$extra -Wl,-u,__emutls_v._ZSt11__once_call -Wl,-u,__emutls_v._ZSt15__once_callable"
-          extra="$extra $rt_arg"
+          extra=""
           for lib in synchronization ntdll mingwex ws2_32 rstrtmgr ole32 userenv bcrypt shlwapi winpthread; do
             f="$(gcc -print-file-name=lib$lib.a)"
             if [ -f "$f" ]; then extra="$extra -l$lib"; fi
           done
-          echo "→ 链接兼容参数：${extra:-（无）}"
+          echo "→ 补充导入库：${extra:-（无）}"
           echo "CGO_LDFLAGS=${extra}" >> "$GITHUB_ENV"
 
       - name: Build desktop app

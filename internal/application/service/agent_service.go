@@ -1526,6 +1526,14 @@ func (s *agentService) registerTools(
 				sessionID, config.WebSearchProviderID)
 
 		case tools.ToolDataAnalysis:
+			if s.duckdb == nil {
+				// Windows 桌面版用 -tags noduckdb 构建，DuckDB 不在二进制里；
+				// 这里跳过注册，避免把一个必然失败的工具暴露给模型。
+				logger.Warnf(ctx,
+					"data_analysis tool skipped for session %s: DuckDB is not compiled into this build",
+					sessionID)
+				continue
+			}
 			toolToRegister = tools.NewDataAnalysisTool(s.knowledgeBaseService, s.knowledgeService, s.tenantService, s.fileService, s.duckdb, sessionID, s.storageResolver).
 				WithSearchTargets(config.SearchTargets)
 			logger.Infof(ctx, "Registered data_analysis tool for session: %s", sessionID)

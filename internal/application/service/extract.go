@@ -646,6 +646,11 @@ func (s *DataTableSummaryService) processTableData(ctx context.Context, resource
 	// 创建DuckDB会话并加载数据
 	sessionID := fmt.Sprintf("table_summary_%s", resources.knowledge.ID)
 	fileSvc := s.resolveFileServiceForKnowledge(ctx, resources)
+	if s.sqlDB == nil {
+		// Windows 桌面版（-tags noduckdb）不编译 DuckDB，表格摄取不可用；
+		// 明确报错，避免空指针并在日志里说清原因。
+		return nil, fmt.Errorf("表格数据分析在当前平台构建中不可用：DuckDB 未编译进二进制（-tags noduckdb）")
+	}
 	duckdbTool := tools.NewDataAnalysisTool(s.knowledgeBaseService, s.knowledgeService, s.tenantService, fileSvc, s.sqlDB, sessionID, s.storageResolver)
 	defer duckdbTool.Cleanup(ctx)
 

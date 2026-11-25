@@ -111,6 +111,13 @@ if [[ "${GOOS_TARGET}" == windows ]]; then
     echo "✗ 目前只支持 TARGET=windows/amd64（其它架构的 anydoc 预编译库不存在）" >&2
     exit 1
   fi
+  # Windows 版不编译 DuckDB：duckdb-go-bindings 的 windows 预编译静态库是 clang
+  # 「模拟 TLS」(-femulated-tls) 产物，需要 __emutls_v.* 与 __emutls_get_address，
+  # 而 UCRT64 的 GCC 用原生 TLS、libgcc 无 emutls 运行时，二者无法链接。
+  # 代价：Windows 版「对话内 Excel 数据分析」与「xlsx 表格摄取」不可用
+  # （xlsx 预览走前端 SheetJS，不受影响）。恢复办法：去掉 noduckdb 标签。
+  BUILD_TAGS="${BUILD_TAGS} noduckdb"
+  echo "→ Windows 构建：跳过 DuckDB（-tags noduckdb）"
   # 两种情形：
   #   a) 在 Windows 上原生构建（MSYS2 / Git-Bash）——编译器就叫 gcc/g++，
   #      而且必须是 UCRT64 那一套：duckdb 的 windows-amd64 预编译静态库引用
