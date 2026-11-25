@@ -78,6 +78,7 @@ if ($env:LOCALAPPDATA) {
 }
 $keyCandidates += @(
     (Join-Path $HOME "Library/Application Support/国研智研体授权管理/licadmin-data/public.key"),
+    (Join-Path $repoRoot "deploy/public.key"),
     (Join-Path $repoRoot "licadmin-data/public.key")
 )
 $keySrc = $keyCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
@@ -157,7 +158,8 @@ if ($StageOnly) {
 
 # 产物名必须能被 cmd/desktop/update.go 的 findBestAsset 认出来：
 # 它按 "win" + "amd64" 匹配可执行文件，早先叫 -windows-x64-Setup.exe 会匹配失败。
-$outName = "cmd\desktop\build\bin\${AppName}-${Version}-windows-amd64-Setup.exe"
+$outFile = "${AppName}-${Version}-windows-amd64-Setup.exe"
+$outName = "cmd\desktop\build\bin\$outFile"
 
 # ── 2. 生成 NSIS 脚本 ──────────────────────────────────────────────────
 # 版本号要四段才能进 VIProductVersion（0.9.0 → 0.9.0.0）
@@ -187,7 +189,7 @@ VIAddVersionKey /LANG=2052 "ProductVersion" "$Version"
 VIAddVersionKey /LANG=2052 "LegalCopyright" "© 2025 国研智研体"
 
 Name "$AppName"
-OutFile "${outName}"
+OutFile "${outFile}"
 InstallDir "`$PROGRAMFILES64\$AppName"
 ; 记住上次安装目录，覆盖安装时不会再问一遍
 InstallDirRegKey HKLM "Software\$AppName" "InstallDir"
@@ -273,9 +275,17 @@ Push-Location $stage
 $makensisExit = $LASTEXITCODE
 Pop-Location
 
+# makensis 的 OutFile 是相对 $stage 的，编译完把它搬回 build/bin
+$builtInstaller = Join-Path $stage $outFile
+$out = Join-Path $repoRoot $outName
+if ($makensisExit -eq 0 -and (Test-Path $builtInstaller)) {
+    $outDir = Split-Path $out -Parent
+    if (-not (Test-Path $outDir)) { New-Item -ItemType Directory -Path $outDir -Force | Out-Null }
+    Move-Item -Force $builtInstaller $out
+}
+
 Remove-Item $stage -Recurse -Force
 
-$out = Join-Path $repoRoot $outName
 if ($makensisExit -ne 0) {
     Write-Error "makensis 失败（退出码 $makensisExit）"
     exit $makensisExit
