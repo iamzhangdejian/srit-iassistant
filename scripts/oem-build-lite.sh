@@ -297,18 +297,25 @@ wails build \
   -ldflags="${LDFLAGS}" \
   -o "${OUT_NAME}"
 
+popd >/dev/null
+
+# 说明：wails 的 -o 是「完整文件名」，给了 -o 就不会自动补 .exe，
+# 所以 Windows 上产物叫 build/bin/weknora-desktop-tmp（没有扩展名）。
+# 这里统一改名成 ${APP_NAME}.exe —— package-windows.ps1 与 NSIS 都按这个名字找。
 if [[ "${TARGET_PLATFORM}" == windows* ]]; then
-  built_exe="cmd/desktop/build/bin/${OUT_NAME}.exe"
-  if [[ -f "${built_exe}" ]]; then
-    mv -f "${built_exe}" "cmd/desktop/build/bin/${APP_NAME}.exe"
+  bin_dir="cmd/desktop/build/bin"
+  src_bin="${bin_dir}/${OUT_NAME}"
+  if [[ -f "${src_bin}" ]]; then
+    mv -f "${src_bin}" "${bin_dir}/${APP_NAME}.exe"
+    echo "→ 已重命名为 ${APP_NAME}.exe"
+  elif [[ -f "${src_bin}.exe" ]]; then
+    mv -f "${src_bin}.exe" "${bin_dir}/${APP_NAME}.exe"
     echo "→ 已重命名为 ${APP_NAME}.exe"
   else
-    echo "✗ 未找到 ${built_exe}；bin 目录当前内容：" >&2
-    ls -l cmd/desktop/build/bin 2>/dev/null >&2 || echo "  （目录不存在）" >&2
+    echo "✗ 未找到 ${src_bin}（也没有 .exe 变体）；bin 目录当前内容：" >&2
+    ls -l "${bin_dir}" 2>/dev/null >&2 || echo "  （目录不存在）" >&2
   fi
 fi
-
-popd >/dev/null
 
 # ── 步骤 4：平台专属打包 ───────────────────────────────────────────────
 echo "→ 平台打包（${TARGET_PLATFORM}）"
