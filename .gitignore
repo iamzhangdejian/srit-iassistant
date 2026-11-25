@@ -90,4 +90,3 @@ miniprogram/project.private.config.json
 /frontend/pnpm-lock.yaml
 
 # 授权公钥（公开材料，随源码交付，供各平台打包脚本嵌入）
-!deploy/public.key

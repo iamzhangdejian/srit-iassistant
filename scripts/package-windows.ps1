@@ -78,8 +78,8 @@ if ($env:LOCALAPPDATA) {
 }
 $keyCandidates += @(
     (Join-Path $HOME "Library/Application Support/国研智研体授权管理/licadmin-data/public.key"),
-    (Join-Path $repoRoot "deploy/public.key"),
-    (Join-Path $repoRoot "licadmin-data/public.key")
+    (Join-Path $repoRoot "licadmin-data/public.key"),
+    (Join-Path $repoRoot "config/license/public.key")
 )
 $keySrc = $keyCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
 if ($keySrc) {
