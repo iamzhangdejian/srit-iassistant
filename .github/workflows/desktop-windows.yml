@@ -144,6 +144,12 @@ jobs:
       # 于是链接期报 undefined reference to `__emutls_v._ZSt11__once_call`。
       # 同时 rayon（anydoc）与 re2 需要 WaitOnAddress/WakeByAddress*、ntdll 系列
       # 导入库。这一步把两件事都补上，产物只在链接期用到，不影响运行时语义。
+      # duckdb-go-bindings 的 Windows 预编译库是用 clang/mingw 且开启「模拟 TLS」
+      # (-femulated-tls) 编出来的：它的 std::call_once 内联代码引用
+      # __emutls_v._ZSt11__once_call / __emutls_v._ZSt15__once_callable 这两个
+      # emutls 控制块，而 UCRT64 的 libstdc++（GCC 16，原生 TLS）不再定义它们。
+      # 因此这里用 clang + -femulated-tls 生成一份**同构**的控制块（布局由编译器
+      # 生成，不手写结构体），再用 whole-archive 强制带进链接。
       - name: Windows link compat libs
         shell: bash
         run: |
@@ -158,27 +164,36 @@ jobs:
           thread_local void* __once_callable = nullptr;
           }
           CPP
-          shim_ok=1
-          if ! g++ -O2 -c "$dir/once_shim.cc" -o "$dir/once_shim.o" 2>"$dir/shim.err"; then
-            echo "::warning::__once_call 兼容层编译失败，跳过"
-            sed -n '1,20p' "$dir/shim.err" || true
-            shim_ok=0
+
+          shim_ok=0
+          if pacman -S --noconfirm --needed mingw-w64-ucrt-x86_64-clang >/tmp/clang-install.log 2>&1; then
+            if clang++ --target=x86_64-w64-windows-gnu -femulated-tls -O2 -c "$dir/once_shim.cc" -o "$dir/once_shim.o" 2>"$dir/shim.err"; then
+              echo "→ 兼容层用 clang + -femulated-tls 生成"
+              shim_ok=1
+            fi
           fi
+          if [ "$shim_ok" = 0 ]; then
+            echo "::warning::clang 模拟 TLS 方案不可用，退回 g++（原生 TLS，可能仍缺 __emutls_v.*）"
+            tail -5 /tmp/clang-install.log 2>/dev/null || true
+            sed -n '1,10p' "$dir/shim.err" 2>/dev/null || true
+            if g++ -O2 -c "$dir/once_shim.cc" -o "$dir/once_shim.o" 2>>"$dir/shim.err"; then shim_ok=1; fi
+          fi
+
           extra=""
           if [ "$shim_ok" = 1 ]; then
             ar rcs "$dir/libwincompat.a" "$dir/once_shim.o"
-            ls -l "$dir/libwincompat.a"
-            echo "--- libwincompat 定义的符号 ---"
-            nm --defined-only "$dir/libwincompat.a" | sed -n '1,10p'
-            # static 库按命令行顺序解析，而 Go 把 CGO_LDFLAGS 放在对象文件之前，
-            # 直接 -lwincompat 会「先查后引用」导致符号被丢弃，所以用 whole-archive
-            # 强制把 shim 的全部符号带进来。
+            echo "--- libwincompat 定义的符号（应含 __emutls_v.*）---"
+            nm --defined-only "$dir/libwincompat.a" | grep -i "once\|emutls" || true
+            if ! nm --defined-only "$dir/libwincompat.a" | grep -q "__emutls_v._ZSt11__once_call"; then
+              echo "::warning::兼容层仍没有 __emutls_v._ZSt11__once_call 符号"
+            fi
             extra="-L$(cygpath -m "$dir") -Wl,--whole-archive -lwincompat -Wl,--no-whole-archive"
           fi
-          # 导入库按「文件是否真的存在」挑选（不靠符号探测）
+          echo "--- libgcc 是否提供 __emutls_get_address ---"
+          nm "$(gcc -print-file-name=libgcc.a)" 2>/dev/null | grep -w "__emutls_get_address" | head -3 || echo "  （未找到）"
           for lib in synchronization ntdll mingwex ws2_32 rstrtmgr ole32 userenv bcrypt shlwapi winpthread; do
             f="$(gcc -print-file-name=lib$lib.a)"
-            if [ -f "$f" ]; then extra="$extra -l$lib"; else echo "  （无 lib$lib.a，跳过）"; fi
+            if [ -f "$f" ]; then extra="$extra -l$lib"; fi
           done
           echo "→ 链接兼容参数：${extra:-（无）}"
           echo "CGO_LDFLAGS=${extra}" >> "$GITHUB_ENV"
