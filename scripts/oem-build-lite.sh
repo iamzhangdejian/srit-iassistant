@@ -156,9 +156,11 @@ if [[ "${GOOS_TARGET}" == windows ]]; then
   # 「由于找不到 libstdc++-6.dll，无法继续执行代码」。这里静态链接它们，
   # 交付物只有单个 exe。duckdb 在 Windows 上已排除（-tags noduckdb），
   # 其 LDFLAGS 里的 --static 不再参与，静态链接不会冲突。
-  export CGO_LDFLAGS="${CGO_LDFLAGS:-} -static-libgcc -static-libstdc++"
-  export CGO_LDFLAGS="${CGO_LDFLAGS} -Wl,-Bstatic -lwinpthread -Wl,-Bdynamic"
-  echo "→ Windows 运行库：静态链接 libgcc / libstdc++ / winpthread"
+  # 用完整 -static：只加 -static-libgcc/-static-libstdc++ 时，MinGW 仍会把
+  # winpthread 留成动态 import（exe 里照样出现 libwinpthread-1.dll）。
+  # 全静态后交付物只依赖系统 UCRT 的 api-ms-win-crt-*（Win10+ 自带）。
+  export CGO_LDFLAGS="${CGO_LDFLAGS:-} -static -static-libgcc -static-libstdc++"
+  echo "→ Windows 运行库：全静态链接（libgcc / libstdc++ / winpthread）"
 
   # sqlite-vec 的 cgo 包装 #include "sqlite3.h"，macOS 能从 SDK 里找到，
   # MinGW 的 sysroot 没有。mattn/go-sqlite3 把同一份 amalgamation 头文件

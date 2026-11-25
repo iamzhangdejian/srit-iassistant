@@ -144,16 +144,16 @@ if ($webview2 -and (Test-Path $webview2)) {
 # 兜底：万一静态链接没生效（换成别的工具链时会发生），把 MinGW 运行时 DLL
 # 一起装进安装目录。缺了它们，exe 双击只会弹「找不到 libstdc++-6.dll」。
 $mingwBin = $null
-foreach ($cand in @($env:MINGW_PREFIX, "C:\msys64\ucrt64")) {
-    if ($cand) {
-        $binDir = Join-Path $cand "bin"
-        if (Test-Path $binDir) { $mingwBin = $binDir; break }
-    }
+$mingwCandidates = @()
+if ($env:MINGW_PREFIX) { $mingwCandidates += (Join-Path $env:MINGW_PREFIX "bin") }
+# setup-msys2 / UCRT64 终端会把 ucrt64\bin 加进 PATH，但安装位置可能是
+# D:\a\_temp\msys64（不能假设 C:\msys64），所以直接扫 PATH。
+foreach ($entry in ($env:PATH -split ';')) {
+    if ($entry -and (Test-Path (Join-Path $entry "libstdc++-6.dll"))) { $mingwCandidates += $entry }
 }
-if (-not $mingwBin) {
-    $gccCmd = Get-Command gcc -ErrorAction SilentlyContinue
-    if ($gccCmd) { $mingwBin = Split-Path $gccCmd.Source -Parent }
-}
+$gccCmd = Get-Command gcc -ErrorAction SilentlyContinue
+if ($gccCmd) { $mingwCandidates += (Split-Path $gccCmd.Source -Parent) }
+$mingwBin = $mingwCandidates | Where-Object { $_ -and (Test-Path (Join-Path $_ "libstdc++-6.dll")) } | Select-Object -First 1
 if ($mingwBin) {
     foreach ($dll in @("libstdc++-6.dll", "libgcc_s_seh-1.dll", "libwinpthread-1.dll")) {
         $dllSrc = Join-Path $mingwBin $dll
