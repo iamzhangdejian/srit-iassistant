@@ -158,6 +158,17 @@ jobs:
           echo "→ 补充导入库：${extra:-（无）}"
           echo "CGO_LDFLAGS=${extra}" >> "$GITHUB_ENV"
 
+      # 客户机可能没装 WebView2（Win10 早期版本、精简镜像、或运行时被策略移除），
+      # 而 Wails 应用没有 WebView2 就起不到窗口。安装包里的 NSI 已有检测 +
+      # ExecWait /silent /install 分支，这里只负责把官方引导器放进仓库根，
+      # package-windows.ps1 会把它拷进 staging 并随安装包一起分发。
+      - name: Fetch WebView2 bootstrapper
+        shell: pwsh
+        run: |
+          Invoke-WebRequest -Uri "https://go.microsoft.com/fwlink/p/?LinkId=2124703" `
+            -OutFile "MicrosoftEdgeWebview2Setup.exe" -UseBasicParsing
+          Get-Item "MicrosoftEdgeWebview2Setup.exe" | Select-Object Name, Length
+
       - name: Build desktop app
         shell: bash
         run: bash scripts/oem-build-lite.sh

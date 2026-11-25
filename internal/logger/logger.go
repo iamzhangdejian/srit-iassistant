@@ -343,7 +343,7 @@ func resolveLogPathFromEnv() string {
 	if logPath := strings.TrimSpace(os.Getenv("LOG_PATH")); logPath != "" {
 		return filepath.Clean(logPath)
 	}
-	return defaultMacAppLogPath()
+	return defaultDesktopLogPath()
 }
 
 // resolveLogFormatFromEnv prefers WEKNORA_LOG_FORMAT, including an explicitly
@@ -372,31 +372,52 @@ func resolveLogFormatFromEnv() string {
 	return tmpl
 }
 
-func defaultMacAppLogPath() string {
+// defaultDesktopLogPath 决定桌面版把日志写到哪里。
+//
+// Windows 曾经完全没有日志：这里只认 macOS 的 .app/Contents/MacOS，其它平台
+// 直接返回空串，于是「双击没反应」时用户拿不到任何线索。现在非 macOS 平台
+// 落到用户配置目录（Windows 为 %APPDATA%\国研智研体\logs\desktop.log），
+// 与桌面版的状态目录保持一致。
+func defaultDesktopLogPath() string {
 	// 便携模式：日志也放进便携目录，避免家目录不可写时启动报警。
 	if portable := strings.TrimSpace(os.Getenv("WK_PORTABLE_DIR")); portable != "" {
 		return filepath.Join(portable, "logs", "desktop.log")
 	}
 
-	execPath, err := os.Executable()
-	if err != nil || !strings.Contains(execPath, ".app/Contents/MacOS") {
-		return ""
-	}
-
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		return ""
-	}
-
 	appName := "国研智研体"
+	execPath, err := os.Executable()
+	if err != nil {
+		execPath = ""
+	}
+
 	if idx := strings.Index(execPath, ".app/Contents/MacOS"); idx >= 0 {
-		bundleName := filepath.Base(execPath[:idx+4])
-		if trimmed := strings.TrimSuffix(bundleName, ".app"); trimmed != "" {
-			appName = trimmed
+		homeDir, err := os.UserHomeDir()
+		if err != nil {
+			return ""
+		}
+		if bundleName := filepath.Base(execPath[:idx+4]); bundleName != "" {
+			if trimmed := strings.TrimSuffix(bundleName, ".app"); trimmed != "" {
+				appName = trimmed
+			}
+		}
+		return filepath.Join(homeDir, "Library", "Logs", appName, appName+".log")
+	}
+
+	if runtime.GOOS == "darwin" {
+		// 非打包形态的 macOS 进程（wails dev、测试）保持原有「不写文件」行为。
+		return ""
+	}
+
+	base := strings.TrimSpace(os.Getenv("XDG_CONFIG_HOME"))
+	if base == "" {
+		if dir, err := os.UserConfigDir(); err == nil {
+			base = dir
 		}
 	}
-
-	return filepath.Join(homeDir, "Library", "Logs", appName, appName+".log")
+	if base == "" {
+		return ""
+	}
+	return filepath.Join(base, appName, "logs", "desktop.log")
 }
 
 func openLogFile(logPath string) (io.WriteCloser, error) {

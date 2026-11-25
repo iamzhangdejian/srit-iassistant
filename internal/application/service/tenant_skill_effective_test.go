@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"sort"
 	"errors"
 	"testing"
 
@@ -292,6 +293,18 @@ type installedTree struct {
 }
 
 func (t installedTree) Installed(name string) bool { return t.installed[name] }
+
+// Names reports the same set Installed does: a test tree has no stray entries.
+func (t installedTree) Names() ([]string, error) {
+	names := make([]string, 0, len(t.installed))
+	for name := range t.installed {
+		if t.installed[name] {
+			names = append(names, name)
+		}
+	}
+	sort.Strings(names)
+	return names, nil
+}
 
 func TestHostSkillsForRunNeedsFilesOnDisk(t *testing.T) {
 	rows := []*types.TenantSkillEntity{

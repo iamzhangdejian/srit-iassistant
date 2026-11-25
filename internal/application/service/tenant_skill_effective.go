@@ -142,6 +142,10 @@ func hostSkillsForRun(
 		logger.Warnf(ctx, "[skill] list local skills failed: %v", err)
 		return sandbox.HostSkillTargetID, nil
 	}
+	// A skill whose files are in the tree but whose row is gone still works;
+	// register it before deciding what this run offers, so the picker and the
+	// model see it again. See adoptOrphanHostSkills.
+	rows = append(rows, adoptOrphanHostSkills(ctx, skills, tree, tenantID, rows)...)
 	usable := make([]*types.TenantSkillEntity, 0, len(rows))
 	for _, row := range rows {
 		if row == nil || !row.Enabled || !tree.Installed(row.Name) {

@@ -55,6 +55,16 @@ func runNativeShell(opts nativeShellOptions) {
 	// 页面侧据此把「浏览器下载」换成「Go 落盘保存」，并隐藏只对浏览器有意义的提示。
 	w.Init("window.__licadminNative = true;")
 
+	// 系统快捷键（⌘Q/⌘W/⌘M，以及输入框的 ⌘C/⌘V/⌘X/⌘A）由 NSApplication 按主菜单
+	// 的 keyEquivalent 派发，webview_go 不建菜单，所以这里自己装一份。
+	// 必须在 Run() 之前装：菜单是窗口起来后用户第一眼就能按的东西。
+	if n := installNativeMenu(); n > 0 {
+		opts.Logf("已安装系统菜单 %d 项（⌘Q 退出 / ⌘W 关闭 / ⌘M 最小化 / 编辑快捷键），快捷键回查：%s",
+			n, describeShortcutMask(menuShortcutMask()))
+	} else {
+		opts.Logf("系统菜单未安装（非 macOS 平台或 AppKit 未就绪），快捷键由窗口自行处理")
+	}
+
 	if err := w.Bind("licadminSaveBackup", func(includeReleases bool) (string, error) {
 		return bindSaveBackup(opts, includeReleases)
 	}); err != nil {
@@ -73,6 +83,30 @@ func runNativeShell(opts nativeShellOptions) {
 
 	w.Navigate(opts.URL + "/")
 	w.Run()
+}
+
+// describeShortcutMask 把回查结果翻成人能看的清单。
+func describeShortcutMask(mask int) string {
+	if mask == 0 {
+		return "无（主菜单没被 AppKit 接住）"
+	}
+	names := []struct {
+		bit  int
+		name string
+	}{
+		{1, "⌘Q"}, {2, "⌘W"}, {4, "⌘M"}, {8, "⌘C"}, {16, "⌘V"},
+	}
+	out := ""
+	for _, it := range names {
+		if mask&it.bit == 0 {
+			continue
+		}
+		if out != "" {
+			out += " "
+		}
+		out += it.name
+	}
+	return out
 }
 
 // bindSaveBackup 把备份直接写到 ~/Downloads，返回落盘路径。

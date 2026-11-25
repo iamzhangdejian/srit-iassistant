@@ -228,6 +228,31 @@ func (t *Tree) Installed(name string) bool {
 	return err == nil && !info.IsDir()
 }
 
+// Names lists the skills whose serving link is live, sorted.
+//
+// It is the on-disk counterpart of the install rows: the tree is what chats
+// actually read, so a skill that is here but has no row is still installed as
+// far as the filesystem is concerned (see service.adoptOrphanHostSkills).
+func (t *Tree) Names() ([]string, error) {
+	entries, err := os.ReadDir(t.root)
+	if err != nil {
+		return nil, fmt.Errorf("skilltree: read %s: %w", t.root, err)
+	}
+	names := make([]string, 0, len(entries))
+	for _, e := range entries {
+		name := e.Name()
+		if name == versionsDir || name == locksDir || strings.HasPrefix(name, nextPrefix) {
+			continue
+		}
+		if !t.Installed(name) {
+			continue
+		}
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names, nil
+}
+
 // Sweep deletes leftovers of runs that died: stale .next- links and version
 // directories that never became active (newer than the live one, or of a
 // skill with no live link). Versions at or below the live one are Prune's to

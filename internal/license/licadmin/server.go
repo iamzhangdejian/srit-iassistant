@@ -171,7 +171,7 @@ func (s *Server) handleMeta(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
 		// 公钥要显示在页面上：部署客户端时要把它写进代码，
 		// 摆在这里能避免「换密钥忘了同步客户端」的经典事故。
-		"public_key":    s.svc.PublicKeyBase64(),
+		"public_key": s.svc.PublicKeyBase64(),
 		// key_id 是这把公钥的指纹。它比整段 base64 好核对：客户端授权页
 		// 现在也会显示自己的 key_id，两边一对就知道是不是同一把密钥。
 		"key_id":        s.svc.PublicKeyID(),

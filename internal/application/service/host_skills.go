@@ -19,6 +19,9 @@ type HostSkillTree interface {
 	Installed(name string) bool
 	Sweep() error
 	Lock(name string) (func(), error)
+	// Names lists the skills whose serving link is live. Adoption compares it
+	// against the install rows to find skills left on disk without one.
+	Names() ([]string, error)
 }
 
 // HostSkillInstaller is the install-only sandbox used to materialize skill

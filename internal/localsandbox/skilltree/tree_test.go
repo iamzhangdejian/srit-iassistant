@@ -171,3 +171,28 @@ func TestLockIsExclusivePerSkill(t *testing.T) {
 	require.NoError(t, err)
 	unlock2()
 }
+
+// Names is what the install-record repair compares against the rows: it must
+// report exactly the skills a chat can read, and nothing bookkeeping keeps.
+func TestNamesListsOnlyLiveSkills(t *testing.T) {
+	tree := newTree(t)
+	pdf := filepath.Join(tree.VersionsRoot(), "pdf-1")
+	require.NoError(t, os.MkdirAll(pdf, 0o755))
+	writeSkill(t, pdf)
+	_, err := tree.Activate("pdf", pdf)
+	require.NoError(t, err)
+
+	// A skill whose serving link is gone is not installed, whatever its
+	// versions directory still holds.
+	docx := filepath.Join(tree.VersionsRoot(), "docx-1")
+	require.NoError(t, os.MkdirAll(docx, 0o755))
+	writeSkill(t, docx)
+
+	// Dangling link: Installed already answers false for it.
+	require.NoError(t, os.Symlink(filepath.Join(tree.VersionsRoot(), "gone-1"),
+		filepath.Join(tree.Root(), "gone")))
+
+	names, err := tree.Names()
+	require.NoError(t, err)
+	require.Equal(t, []string{"pdf"}, names)
+}

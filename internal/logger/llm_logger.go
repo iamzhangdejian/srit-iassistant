@@ -54,8 +54,8 @@ func resolveLLMDebugDir() string {
 	if logPath := strings.TrimSpace(os.Getenv("LOG_PATH")); logPath != "" {
 		return filepath.Join(filepath.Dir(logPath), "llm_debug")
 	}
-	if macPath := defaultMacAppLogPath(); macPath != "" {
-		return filepath.Join(filepath.Dir(macPath), "llm_debug")
+	if desktopPath := defaultDesktopLogPath(); desktopPath != "" {
+		return filepath.Join(filepath.Dir(desktopPath), "llm_debug")
 	}
 	return "llm_debug"
 }

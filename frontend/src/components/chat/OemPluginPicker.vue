@@ -69,17 +69,68 @@
 </template>
 
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useSettingsStore } from '@/stores/settings'
+import { useDeploymentCapabilitiesStore } from '@/stores/deploymentCapabilities'
+import { hostSkillsOnly, mentionSkillTargetId } from '@/utils/skillTarget'
 import { listSkills, type SkillInfo } from '@/api/skill'
 
 const { t } = useI18n()
 const settingsStore = useSettingsStore()
+const deploymentCapabilities = useDeploymentCapabilitiesStore()
 
 const visible = ref(false)
 const loading = ref(false)
 const skills = ref<SkillInfo[]>([])
+
+/**
+ * OEM 修复（2026-11-25）：本组件原先调用 listSkills() 时不传沙箱目标，
+ * 后端 /api/v1/skills 在没有 sandbox_config_id 时直接返回空列表
+ * （内部 skill_handler.go 的早退分支），于是「已安装插件」在对话框里永远
+ * 显示为「暂未安装插件」。
+ *
+ * 桌面 Lite 的技能跑在本机目录（host 目标），因此这里与输入框 @ 技能选择器
+ * 使用同一套解析规则（utils/skillTarget.ts）：
+ *   remote 不受支持、host 受支持 → 目标为 "host"
+ *   否则沿用当前 Agent 的 sandbox_config_id（无则空，后端仍会返回空列表）
+ */
+async function resolveSkillTarget(): Promise<string> {
+  await deploymentCapabilities.ensureLoaded()
+  const hostOnly = hostSkillsOnly(
+    deploymentCapabilities.isSupported('settings.sandbox.remote'),
+    deploymentCapabilities.isSupported('settings.sandbox.host'),
+  )
+  return mentionSkillTargetId(hostOnly, '')
+}
+
+/**
+ * 拉取可用插件；面板每次展开都会重拉，安装/卸载后无需刷新页面。
+ * 返回是否真的拿到了应答：拉取失败时不能据此清理已勾选的插件。
+ */
+async function loadSkills(): Promise<boolean> {
+  loading.value = true
+  try {
+    const target = await resolveSkillTarget()
+    const res = await listSkills(target)
+    skills.value = res?.data || []
+    return true
+  } catch {
+    // 插件列表拉取失败不应影响对话主流程
+    skills.value = []
+    return false
+  } finally {
+    loading.value = false
+  }
+}
+
+/** 收起时取消勾选已不存在的插件，避免把失效名称带进请求体 */
+function pruneSelected() {
+  const names = new Set(skills.value.map((s) => s.name))
+  for (const name of [...selectedSkills.value]) {
+    if (!names.has(name)) settingsStore.removeSkill(name)
+  }
+}
 
 /**
  * 勾选结果统一存在 settings store 的 selectedSkills 字段，
@@ -117,16 +168,13 @@ onBeforeUnmount(() => {
 
 onMounted(async () => {
   document.addEventListener('click', closeOnOutside, true)
-  loading.value = true
-  try {
-    const res = await listSkills()
-    skills.value = res?.data || []
-  } catch {
-    // 插件列表拉取失败不应影响对话主流程
-    skills.value = []
-  } finally {
-    loading.value = false
-  }
+  if (await loadSkills()) pruneSelected()
+})
+
+// 面板每次展开都重新拉取：插件市场里刚装的插件立刻可见，卸载后也会消失
+watch(visible, async (open) => {
+  if (!open) return
+  if (await loadSkills()) pruneSelected()
 })
 </script>
 

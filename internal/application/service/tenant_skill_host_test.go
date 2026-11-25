@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"sort"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -105,6 +106,14 @@ func (f *fakeHostSkillTree) Remove(name string) error {
 	return nil
 }
 func (f *fakeHostSkillTree) Installed(name string) bool { return f.active[name] != "" }
+func (f *fakeHostSkillTree) Names() ([]string, error) {
+	names := make([]string, 0, len(f.active))
+	for name := range f.active {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names, nil
+}
 func (f *fakeHostSkillTree) Sweep() error               { return nil }
 func (f *fakeHostSkillTree) Lock(string) (func(), error) {
 	f.held.Add(1)

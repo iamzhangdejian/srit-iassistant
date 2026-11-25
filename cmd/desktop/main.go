@@ -32,6 +32,8 @@ import (
 	"github.com/Tencent/WeKnora/internal/handler"
 	sessionhandler "github.com/Tencent/WeKnora/internal/handler/session"
 	"github.com/Tencent/WeKnora/internal/logger"
+	goruntime "runtime"
+
 	"github.com/Tencent/WeKnora/internal/runtime"
 	"github.com/Tencent/WeKnora/internal/stream"
 	"github.com/Tencent/WeKnora/internal/types/interfaces"
@@ -212,9 +214,14 @@ func ensureDesktopLiteEdition() {
 //     编译期就进二进制，不依赖运行时 cwd，打包后也一定拿得到。
 //  2. desktopAboutVersion() —— handler.Version（ldflags 注入）或运行时读 VERSION 文件，
 //     兼容直接跑二进制调试的场景。
-//  3. 都没有就只显示应用名，绝不出现 "vunknown" 这种丑陋文案。
+//
+// desktopAppName 是产品名，同时决定 Windows/Linux 上的用户状态目录名
+// （%APPDATA%\国研智研体）与日志文件名。
+const desktopAppName = "国研智研体"
+
+// 3. 都没有就只显示应用名，绝不出现 "vunknown" 这种丑陋文案。
 func desktopWindowTitle() string {
-	const appName = "国研智研体"
+	const appName = desktopAppName
 	v := strings.TrimSpace(desktopVersion)
 	if v == "" || v == "unknown" {
 		v = strings.TrimSpace(desktopAboutVersion())
@@ -227,6 +234,13 @@ func desktopWindowTitle() string {
 }
 
 func main() {
+	// 先把启动痕迹落盘：Windows 没有控制台，启动 panic 只表现为「双击没反应」。
+	bootExec, bootErr := os.Executable()
+	if bootErr == nil {
+		bootLogHeader(bootExec)
+		defer recoverBootPanic(bootExec)
+	}
+
 	ensureDesktopLiteEdition()
 
 	// For macOS .app bundle, the working directory is usually "/" or the MacOS folder.
@@ -235,6 +249,17 @@ func main() {
 	configRoot, hasConfigRoot := "", false
 	if errPath == nil {
 		configRoot, hasConfigRoot = desktopConfigRoot(execPath)
+	}
+	// 必须是绝对路径：下面要 chdir 进去，再按 configRoot 找 .env。
+	// 相对路径在 chdir 之后会指向「新 cwd 下的同名相对路径」，.env 读不到，
+	// DB_DRIVER 就为空 → 启动 panic（Windows 上表现为双击没反应）。
+	if hasConfigRoot {
+		if abs, err := filepath.Abs(configRoot); err == nil {
+			configRoot = abs
+		}
+	}
+	if bootErr == nil {
+		appendBootLog(bootExec, "config root=%q found=%v", configRoot, hasConfigRoot)
 	}
 	if hasConfigRoot {
 		_ = os.Chdir(configRoot)
@@ -253,6 +278,10 @@ func main() {
 	}
 	configureDesktopStorage(execPath)
 	configureDesktopFileStorage(execPath)
+	if bootErr == nil {
+		appendBootLog(bootExec, "storage db_path=%q files=%q portable=%q",
+			os.Getenv("DB_PATH"), os.Getenv("LOCAL_STORAGE_BASE_DIR"), os.Getenv("WK_PORTABLE_DIR"))
+	}
 	configureDesktopSSRFWhitelist()
 	reportDesktopWriteSanity()
 
@@ -468,10 +497,18 @@ func main() {
 		checkUpdate(app.ctx, desktopAboutVersion(), true, false)
 	})
 	FileMenu.AddSeparator()
-	FileMenu.AddText("Quit", keys.CmdOrCtrl("q"), func(_ *menu.CallbackData) {
-		app.shutdown(context.Background())
-		os.Exit(0)
-	})
+
+	// 退出：先让后端正常收尾（停监听、关库），再结束进程。
+	// 兜底看门狗 6 秒：正常收尾要等 drain / cleanup 预算，一旦某个环节卡住，
+	// 用户看到的就是「按了 ⌘Q 没反应」。宁可硬退，也不要假死。
+	quitApp := func(_ *menu.CallbackData) {
+		go func() {
+			time.AfterFunc(6*time.Second, func() { os.Exit(0) })
+			app.shutdown(context.Background())
+			os.Exit(0)
+		}()
+	}
+	FileMenu.AddText("Quit", keys.CmdOrCtrl("q"), quitApp)
 
 	AppMenu.Append(menu.EditMenu())
 
@@ -481,6 +518,31 @@ func main() {
 			wailsruntime.EventsEmit(app.ctx, "app:reload")
 		}
 	})
+
+	// Window 菜单：⌘M / ⌘W 这类快捷键不是窗口自己处理的。macOS 的路径是
+	// NSApplication 收到按键 → 去 NSApp.mainMenu 里找 keyEquivalent 匹配的
+	// 条目 → 找到才把 action 发出去。Wails 默认只给 App 与 Edit 两段菜单，
+	// 少一段 Window，这两个键就一个 action 都匹配不到，表现成「死键」。
+	WindowMenu := AppMenu.AddSubmenu("Window")
+	WindowMenu.AddText("Minimize", keys.CmdOrCtrl("m"), func(_ *menu.CallbackData) {
+		if app.ctx != nil {
+			wailsruntime.WindowMinimise(app.ctx)
+		}
+	})
+	WindowMenu.AddText("Zoom", nil, func(_ *menu.CallbackData) {
+		if app.ctx == nil {
+			return
+		}
+		if wailsruntime.WindowIsMaximised(app.ctx) {
+			wailsruntime.WindowUnmaximise(app.ctx)
+			return
+		}
+		wailsruntime.WindowMaximise(app.ctx)
+	})
+	WindowMenu.AddSeparator()
+	// 关闭窗口：本应用单窗口、无托盘，窗口关掉后进程留在后台等于用户什么
+	// 也看不到，所以 ⌘W 与 ⌘Q 走同一条收尾路径，避免出现隐形僵尸进程。
+	WindowMenu.AddText("Close Window", keys.CmdOrCtrl("w"), quitApp)
 
 	// Wait for the backend URL to be set
 	targetURL, _ := url.Parse(app.backendURL)
@@ -600,19 +662,24 @@ func configureDesktopSSRFWhitelist() {
 }
 
 func configureDesktopStorage(execPath string) {
-	if execPath == "" || !strings.Contains(execPath, ".app/Contents/MacOS") {
-		return
-	}
-
-	appSupportDir, err := defaultMacAppSupportDir(execPath)
+	appSupportDir, err := desktopStateDir(execPath)
 	if err != nil {
-		logger.Warnf(context.Background(), "Failed to resolve app support dir: %v", err)
+		logger.Warnf(context.Background(), "Failed to resolve desktop state dir: %v", err)
 		return
 	}
 
-	legacyResourcesDir := filepath.Join(filepath.Dir(filepath.Dir(execPath)), "Resources")
-	targetDataDir := filepath.Join(appSupportDir, "data")
-	migrateLegacyDesktopData(legacyResourcesDir, targetDataDir)
+	// macOS 的上一版把数据放在 .app/Contents/Resources，搬一次；其它平台
+	// 没有这段历史，跳过。
+	if goruntime.GOOS == "darwin" && strings.Contains(execPath, ".app/Contents/MacOS") {
+		legacyResourcesDir := filepath.Join(filepath.Dir(filepath.Dir(execPath)), "Resources")
+		migrateLegacyDesktopData(legacyResourcesDir, filepath.Join(appSupportDir, "data"))
+	}
+
+	// .env 缺失/被安全软件删掉时 DB_DRIVER 会是空串，容器初始化会直接报
+	// "unsupported database driver"。桌面版只支持 sqlite，这里补一个兜底。
+	if strings.TrimSpace(os.Getenv("DB_DRIVER")) == "" {
+		_ = os.Setenv("DB_DRIVER", "sqlite")
+	}
 
 	dbPath := resolveDesktopDataPath(os.Getenv("DB_PATH"), filepath.Join("data", "weknora.db"), appSupportDir)
 
@@ -621,6 +688,30 @@ func configureDesktopStorage(execPath string) {
 	}
 
 	_ = os.Setenv("DB_PATH", dbPath)
+}
+
+// desktopStateDir is where every writable piece of desktop state lives.
+//
+// Windows 必须走这里：安装目录在 C:\Program Files 下是只读的，而打包进去的
+// .env 写的是相对路径 ./data/weknora.db。进程 chdir 到安装目录后 sqlite 打不开
+// 那个文件就 panic，Windows 上又没有控制台，用户看到的只是「双击没反应」。
+// 所以非 macOS 平台一律把状态放到用户可写目录（%APPDATA%\国研智研体）。
+func desktopStateDir(execPath string) (string, error) {
+	if portable := strings.TrimSpace(os.Getenv("WK_PORTABLE_DIR")); portable != "" {
+		return portable, nil
+	}
+	if goruntime.GOOS == "darwin" && strings.Contains(execPath, ".app/Contents/MacOS") {
+		return defaultMacAppSupportDir(execPath)
+	}
+	configDir, err := desktopConfigDir()
+	if err != nil {
+		return "", err
+	}
+	if configDir == "" {
+		return "", fmt.Errorf("cannot resolve user config dir")
+	}
+	// desktopConfigDir 是「配置根」，各种应用的子目录应该建在它下面。
+	return filepath.Join(configDir, desktopAppName), nil
 }
 
 // configureDesktopFileStorage points Lite file uploads at ~/.weknora/data/files.
@@ -645,6 +736,11 @@ func configureDesktopFileStorage(execPath string) {
 		return
 	}
 	filesPath := desktopLocalFilesDir(home)
+	if stateDir, err := desktopStateDir(execPath); err == nil && goruntime.GOOS != "darwin" {
+		// 非 macOS：跟随数据库一起放在用户可写目录，别再落到安装目录或
+		// 家目录下的隐藏目录（企业环境里后者常被管控）。
+		filesPath = filepath.Join(stateDir, "data", "files")
+	}
 	raw := strings.TrimSpace(os.Getenv("LOCAL_STORAGE_BASE_DIR"))
 	if !useDesktopFilesDir(raw) {
 		return
