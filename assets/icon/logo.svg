@@ -1,0 +1,26 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="g" x1="0.12" y1="0" x2="0.88" y2="1">
+      <stop offset="0" stop-color="#1ade82"/>
+      <stop offset="0.58" stop-color="#059c4d"/>
+      <stop offset="1" stop-color="#046b36"/>
+    </linearGradient>
+    <linearGradient id="gloss" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#ffffff" stop-opacity="0.30"/>
+      <stop offset="0.48" stop-color="#ffffff" stop-opacity="0.05"/>
+      <stop offset="1" stop-color="#ffffff" stop-opacity="0"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0.5" cy="0.15" r="0.75">
+      <stop offset="0" stop-color="#7dffc0" stop-opacity="0.45"/>
+      <stop offset="1" stop-color="#7dffc0" stop-opacity="0"/>
+    </radialGradient>
+  </defs>
+  <rect x="100" y="100" width="824" height="824" rx="185" fill="url(#g)"/>
+  <rect x="100" y="100" width="824" height="824" rx="185" fill="url(#glow)"/>
+  <rect x="100" y="100" width="824" height="824" rx="185" fill="url(#gloss)"/>
+  <rect x="101.5" y="101.5" width="821" height="821" rx="184" fill="none" stroke="#ffffff" stroke-opacity="0.24" stroke-width="3"/>
+  <g transform="translate(260,260) scale(21)" fill="none" stroke="#ffffff" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M12 2.8 4.4 7v10L12 21.2 19.6 17V7z"/>
+    <path d="M12 7.6 8.2 9.8v4.4L12 16.4l3.8-2.2V9.8z"/>
+  </g>
+</svg>

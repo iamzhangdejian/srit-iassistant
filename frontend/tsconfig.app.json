@@ -1,0 +1,21 @@
+{
+  "extends": "@vue/tsconfig/tsconfig.dom.json",
+  "include": ["env.d.ts", "src/**/*", "src/**/*.vue"],
+  "exclude": [
+    "src/**/__tests__/*",
+    // Node-only i18n audit script, run via `tsx` (see package.json check-i18n).
+    // It imports @intlify/core-base, which pnpm keeps unhoisted as a transitive
+    // dep of vue-i18n, so the browser tsconfig cannot resolve it.
+    "src/i18n/localeKeyAudit.ts",
+    "src/i18n/localeKeyAudit.test.ts"
+  ],
+  "compilerOptions": {
+    "tsBuildInfoFile": "./node_modules/.tmp/tsconfig.app.tsbuildinfo",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "types": ["vite/client"],
+
+    "paths": {
+      "@/*": ["./src/*"]
+    }
+  }
+}

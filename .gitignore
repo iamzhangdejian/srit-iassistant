@@ -1,0 +1,92 @@
+# 忽略所有隐藏文件和目录
+.*
+# 但不忽略特定隐藏文件和目录
+!.env.example
+!.gitignore
+!.github/
+
+# 敏感文件
+*.pem
+*_key
+*_secret
+*.key
+*.crt
+
+# 例外：授权公钥是**发行资产**，必须随版本库一起走。
+# 它本来就随每个安装包明文分发，不构成秘密；反而必须被版本控制固定住——
+# 2026-11 的事故就是公钥跟着某台机器的运行目录漂移，历史授权码集体失效。
+!config/license/public.key
+
+# IDE和编辑器文件
+*.swp
+*.swo
+
+# 构建和依赖文件
+node_modules/
+/dist/
+/build/
+*.log
+
+# 发码端私钥与台账绝不入库（旧位置残留，见 scripts/check-license-keys.sh）
+licadmin-data/
+
+# 临时文件
+tmp/
+temp/
+logs/
+*.pid
+
+WeKnora
+WeKnora-lite
+cmd/desktop/build/bin/
+/models/
+test/data/mswag.txt
+data/files/
+data/weknora.db
+data/weknora.db-wal
+data/weknora.db-shm
+skills-lock.json
+
+web/
+
+**/__pycache__
+/scripts/scale_dev_jobs.sh
+/server
+frontend/.vite
+frontend/chrome-extension/
+WeKnora-Chrome-Extension
+packages/protoc-3.19.4-linux-x86_64.zip
+
+Claude.md
+
+# 本地测试脚本
+configure-ollama.sh
+fix-docker.sh
+
+# WeChat Mini Program local/private configuration
+miniprogram/project.private.config.json
+
+# Staging dir for the Docker sandbox self-check probe (removed after each run)
+.weknora-sandbox-check-*
+
+# Locally built BrowserSkill runtime and extension bundles
+/artifacts/browserskill/
+
+# 本地试跑留下的二进制（330MB desktop / 13MB licadmin），绝不入库
+/desktop
+/licadmin
+/server
+
+# 本仓库的工具链与构建产物（体积大，不入库；CI 里按需装）
+# 注意：cmd/desktop/build/ 下的 appicon.png、darwin/Info.plist 是入库的脚手架文件，
+# 所以只忽略编译/打包的中间目录。
+/tools/
+/bin/
+/node_modules
+/cmd/desktop/build/bin/
+/cmd/desktop/build/AppDir/
+/cmd/desktop/build/dmg_staging/
+/cmd/desktop/build/windows_staging/
+/frontend/pnpm-lock.yaml
+
+# 授权公钥（公开材料，随源码交付，供各平台打包脚本嵌入）
