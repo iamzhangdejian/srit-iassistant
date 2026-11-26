@@ -291,10 +291,27 @@ fi
 # （VERSION.embedded、frontend/dist）在构建前都已存在，不需要它创建。
 # Windows 上把中文名传给 wails 的 -o 不可靠（Git-Bash → Go 参数编码），
 # 所以先编成 ASCII 名，再在下面改名成品牌名。macOS/Linux 仍直接用品牌名。
+# 诊断用：WIN_CONSOLE=1 时产出带控制台的 Windows 版（wails -windowsconsole）。
+# GUI 子系统的 exe 在启动早期失败时没有任何输出，客户机只能看到「双击没反应」；
+# 控制台版会把 panic/错误直接打印出来，是排查这类问题的第一手证据。
+# 诊断开关也可以由仓库内的标记文件触发：CI 的 workflow 不便频繁改动，
+# 需要一份「带控制台」的排错版本时，提交 scripts/.win-console 即可。
+if [[ "${TARGET_PLATFORM}" == windows* && -f "scripts/.win-console" ]]; then
+  WIN_CONSOLE=1
+fi
+
+CONSOLE_FLAG=""
+OUT_SUFFIX=""
+if [[ "${TARGET_PLATFORM}" == windows* && "${WIN_CONSOLE:-0}" == "1" ]]; then
+  CONSOLE_FLAG="-windowsconsole"
+  OUT_SUFFIX="-console"
+  echo "→ 诊断构建：带控制台（-windowsconsole）"
+fi
+
 if [[ "${TARGET_PLATFORM}" == windows* ]]; then
-  OUT_NAME="weknora-desktop-tmp"
+  OUT_NAME="weknora-desktop-tmp${OUT_SUFFIX}"
 else
-  OUT_NAME="${APP_NAME}"
+  OUT_NAME="${APP_NAME}${OUT_SUFFIX}"
 fi
 
 wails build \
@@ -305,6 +322,7 @@ wails build \
   -tags "${BUILD_TAGS}" \
   -platform "${TARGET_PLATFORM}" \
   ${NSIS_FLAG:+"${NSIS_FLAG}"} \
+  ${CONSOLE_FLAG:+"${CONSOLE_FLAG}"} \
   -ldflags="${LDFLAGS}" \
   -o "${OUT_NAME}"
 
@@ -316,12 +334,13 @@ popd >/dev/null
 if [[ "${TARGET_PLATFORM}" == windows* ]]; then
   bin_dir="cmd/desktop/build/bin"
   src_bin="${bin_dir}/${OUT_NAME}"
+  final_name="${APP_NAME}${OUT_SUFFIX}.exe"
   if [[ -f "${src_bin}" ]]; then
-    mv -f "${src_bin}" "${bin_dir}/${APP_NAME}.exe"
-    echo "→ 已重命名为 ${APP_NAME}.exe"
+    mv -f "${src_bin}" "${bin_dir}/${final_name}"
+    echo "→ 已重命名为 ${final_name}"
   elif [[ -f "${src_bin}.exe" ]]; then
-    mv -f "${src_bin}.exe" "${bin_dir}/${APP_NAME}.exe"
-    echo "→ 已重命名为 ${APP_NAME}.exe"
+    mv -f "${src_bin}.exe" "${bin_dir}/${final_name}"
+    echo "→ 已重命名为 ${final_name}"
   else
     echo "✗ 未找到 ${src_bin}（也没有 .exe 变体）；bin 目录当前内容：" >&2
     ls -l "${bin_dir}" 2>/dev/null >&2 || echo "  （目录不存在）" >&2
@@ -338,7 +357,9 @@ case "${TARGET_PLATFORM}" in
     bash scripts/package-linux.sh "${APP_NAME}" "${VERSION}"
     ;;
   windows/*)
-    if command -v pwsh >/dev/null 2>&1; then
+    if [[ -n "${OUT_SUFFIX}" ]]; then
+      echo "→ 诊断构建：跳过安装包，只留 ${APP_NAME}${OUT_SUFFIX}.exe"
+    elif command -v pwsh >/dev/null 2>&1; then
       pwsh -File scripts/package-windows.ps1 -AppName "${APP_NAME}" -Version "${VERSION}"
     else
       echo "⚠ 未检测到 pwsh，跳过 Windows 安装包（.exe 本体已生成）"
