@@ -17,6 +17,8 @@
 param(
     [string]$AppName = "国研智研体",
     [string]$Version = "0.9.0",
+    # 启动器文件名：快捷方式指向它，而不是 242MB 的主程序。
+    [string]$LauncherName = "国研智研体-启动器",
     [switch]$StageOnly
 )
 
@@ -50,6 +52,25 @@ if (Test-Path $stage) { Remove-Item $stage -Recurse -Force }
 New-Item -ItemType Directory -Path $stage | Out-Null
 
 Copy-Item $exe (Join-Path $stage "$AppName.exe")
+
+# ── 启动器：快捷方式指向它，而不是主程序 ────────────────────────────
+# 主程序是 242MB、带 cgo 与静态 Rust 库的 GUI 可执行文件，在装了第三方安全
+# 软件 / 有终端管控的机器上，它可能在被 CreateProcess 的那一刻就被拦掉 ——
+# 进程根本没被创建，于是主程序自己的 boot.log 一行都不会有，用户看到的就是
+# 「双击没反应、零日志」。启动器（cmd/wklaunch，纯 Go、2MB）先写
+# %APPDATA%\国研智研体\logs\launcher.log，再拉起主程序；拉起失败时把
+# Win32 错误码（225=被安全软件阻止、5=拒绝访问、1260=组策略禁止）翻译成
+# 人话并弹窗。这样「谁被拦了」第一次就能自证，不必再登客户机复现。
+$launcher = Join-Path $repoRoot "cmd\desktop\build\bin\$LauncherName.exe"
+$useLauncher = Test-Path $launcher
+if ($useLauncher) {
+    Copy-Item $launcher (Join-Path $stage "$LauncherName.exe")
+    Write-Host "  ✓ 已附带启动器：$LauncherName.exe"
+} else {
+    # 不静默降级：没有启动器时仍能出包，但会失去全部取证能力，
+    # 必须在 CI 日志里显眼地警告，避免「以为有、其实没有」。
+    Write-Warning "未找到 $launcher，安装包将直接指向主程序（受管控机器被拦时将无任何日志）"
+}
 
 # 运行资源：与 macOS/Linux 同理，缺了会启动失败
 foreach ($dir in @("config", "migrations\sqlite")) {
@@ -200,6 +221,14 @@ if ($hasIcon) {
     $iconLine = '  Icon "app.ico"' + "`n"
 }
 
+# 快捷方式的指向：NSIS 里的 `$INSTDIR 要写成普通字符串交给 makensis，
+# 所以在 PowerShell 侧用反引号转义 $，再把它塞进下面的 here-string。
+if ($useLauncher) {
+    $lnkTarget = "`$INSTDIR\$LauncherName.exe"
+} else {
+    $lnkTarget = "`$INSTDIR\$AppName.exe"
+}
+
 $nsi = @"
 !include "MUI2.nsh"
 !include "x64.nsh"
@@ -243,11 +272,14 @@ Section "Install"
   WriteUninstaller "`$INSTDIR\uninstall.exe"
 
   CreateDirectory "`$SMPROGRAMS\$AppName"
-  CreateShortcut "`$SMPROGRAMS\$AppName\$AppName.lnk" "`$INSTDIR\$AppName.exe" "" "" "" "" "" "${AppName}"
-  CreateShortcut "`$DESKTOP\$AppName.lnk" "`$INSTDIR\$AppName.exe" "" "" "" "" "" "${AppName}"
+  ; 目标一律走 $lnkTarget：有启动器时指向启动器，它再拉起 $AppName.exe。
+  ; 起始位置留空 → 取目标所在目录，与启动器自己设置的 cwd 一致。
+  CreateShortcut "`$SMPROGRAMS\$AppName\$AppName.lnk" "$lnkTarget" "" "" "" "" "" "${AppName}"
+  CreateShortcut "`$DESKTOP\$AppName.lnk" "$lnkTarget" "" "" "" "" "" "${AppName}"
 
   WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\$AppName" "DisplayName" "$AppName"
   WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\$AppName" "DisplayVersion" "$Version"
+  ; 图标仍取主程序（它有完整图标资源），不取启动器。
   WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\$AppName" "DisplayIcon" "`$INSTDIR\$AppName.exe"
   WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\$AppName" "Publisher" "国研智研体"
   WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\$AppName" "InstallLocation" "`$INSTDIR"

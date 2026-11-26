@@ -347,6 +347,31 @@ if [[ "${TARGET_PLATFORM}" == windows* ]]; then
   fi
 fi
 
+# 启动器：纯 Go、CGO 关、GUI 子系统（~2MB）。装完以后快捷方式指向它，
+# 由它先写 launcher.log 再拉起主程序 —— 主程序在受管控机器上可能被安全软件
+# 在 CreateProcess 阶段就拦掉，进程根本没被创建，主程序自己的 boot.log
+# 一行都不会有。启动器把这种「静默失败」变成「带错误码的失败」
+# （225=被安全软件阻止、5=拒绝访问、1260=组策略禁止）。
+# 放在打包之前：package-windows.ps1 靠 bin 目录里有没有这个文件决定
+# 快捷方式指向谁，晚一步就会退回「静默」的旧行为。
+if [[ "${TARGET_PLATFORM}" == windows* ]]; then
+  LAUNCHER_NAME="${APP_NAME}-启动器.exe"
+  echo "→ 编译启动器 ${LAUNCHER_NAME}"
+  CGO_ENABLED=0 GOOS=windows GOARCH=amd64 \
+    go build -trimpath \
+    -ldflags "-s -w -H windowsgui -X main.version=${VERSION}" \
+    -o "cmd/desktop/build/bin/${LAUNCHER_NAME}" ./cmd/wklaunch
+  ls -l "cmd/desktop/build/bin/${LAUNCHER_NAME}" 2>/dev/null || true
+fi
+
+# 诊断构建时顺带编一个「最小可执行体」：它不依赖业务代码，
+# 用来区分「产物/机器跑不了」与「国研智研体初始化失败」。
+if [[ "${TARGET_PLATFORM}" == windows* && -n "${OUT_SUFFIX}" ]]; then
+  echo "→ 诊断构建：编译最小可执行体 ${APP_NAME}-diag.exe"
+  CGO_ENABLED=0 GOOS=windows GOARCH=amd64 \
+    go build -trimpath -o "cmd/desktop/build/bin/${APP_NAME}-diag.exe" ./cmd/windiag
+fi
+
 # ── 步骤 4：平台专属打包 ───────────────────────────────────────────────
 echo "→ 平台打包（${TARGET_PLATFORM}）"
 case "${TARGET_PLATFORM}" in
@@ -360,7 +385,8 @@ case "${TARGET_PLATFORM}" in
     if [[ -n "${OUT_SUFFIX}" ]]; then
       echo "→ 诊断构建：跳过安装包，只留 ${APP_NAME}${OUT_SUFFIX}.exe"
     elif command -v pwsh >/dev/null 2>&1; then
-      pwsh -File scripts/package-windows.ps1 -AppName "${APP_NAME}" -Version "${VERSION}"
+      pwsh -File scripts/package-windows.ps1 -AppName "${APP_NAME}" -Version "${VERSION}" \
+        -LauncherName "${APP_NAME}-启动器"
     else
       echo "⚠ 未检测到 pwsh，跳过 Windows 安装包（.exe 本体已生成）"
     fi

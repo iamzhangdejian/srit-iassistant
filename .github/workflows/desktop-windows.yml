@@ -96,7 +96,7 @@ jobs:
           echo "gcc resolves to: $gcc_path"
           case "$gcc_path" in
             *ucrt64*) ;;
-            *) echo "::error::gcc 不在 ucrt64 目录下（$gcc_path）；duckdb 预编译库要求 UCRT64"; exit 1 ;;
+            *) echo "::error::gcc 不在 ucrt64 目录下（${gcc_path}）；duckdb 预编译库要求 UCRT64"; exit 1 ;;
           esac
           machine="$(gcc -dumpmachine)"
           [[ "$machine" == "x86_64-w64-mingw32" ]] || {
@@ -158,6 +158,17 @@ jobs:
           echo "→ 补充导入库：${extra:-（无）}"
           echo "CGO_LDFLAGS=${extra}" >> "$GITHUB_ENV"
 
+      # 客户机可能没装 WebView2（Win10 早期版本、精简镜像、或运行时被策略移除），
+      # 而 Wails 应用没有 WebView2 就起不到窗口。安装包里的 NSI 已有检测 +
+      # ExecWait /silent /install 分支，这里只负责把官方引导器放进仓库根，
+      # package-windows.ps1 会把它拷进 staging 并随安装包一起分发。
+      - name: Fetch WebView2 bootstrapper
+        shell: pwsh
+        run: |
+          Invoke-WebRequest -Uri "https://go.microsoft.com/fwlink/p/?LinkId=2124703" `
+            -OutFile "MicrosoftEdgeWebview2Setup.exe" -UseBasicParsing
+          Get-Item "MicrosoftEdgeWebview2Setup.exe" | Select-Object Name, Length
+
       - name: Build desktop app
         shell: bash
         run: bash scripts/oem-build-lite.sh
@@ -166,6 +177,59 @@ jobs:
           APP_NAME: 国研智研体
           UPDATE_REPO: ${{ vars.WEKNORA_UPDATE_REPO }}
 
+      # 启动器：纯 Go、CGO 关、GUI 子系统（~2MB）。用户在受管控机器上双击的
+      # 是它，而不是 242MB 主程序。它先写 %APPDATA%\国研智研体\logs\launcher.log，
+      # 再 CreateProcess 主程序；拉起失败时把 Win32 错误码翻译成人话并弹窗 ——
+      # 225(ERROR_VIRUS_INFECTED)/5/1260 这类「安全软件或组策略拦掉了」的直接
+      # 证据以前永远拿不到，现在第一次双击就有。
+      #
+      # 为什么放这一步而不是更早：oem-build-lite.sh 会重建 build/bin，
+      # 先编会被冲掉。CGO_ENABLED=0 覆盖 job 级的 CGO_ENABLED=1。
+      # 启动器由 oem-build-lite.sh 在平台打包之前编译（package-windows.ps1
+      # 靠 bin 目录里有没有它来决定快捷方式指向谁），这里只做守卫：
+      # 缺了就等于退回「双击没反应、零日志」的旧行为，必须让 CI 炸掉。
+      - name: Verify launcher present
+        shell: bash
+        run: |
+          set -euo pipefail
+          LAUNCHER="cmd/desktop/build/bin/国研智研体-启动器.exe"
+          if [ ! -f "$LAUNCHER" ]; then
+            echo "::error::启动器缺失（${LAUNCHER}）—— 安装包会直接指向主程序，受管控机器被拦时将无任何日志"
+            exit 1
+          fi
+          ls -lh "$LAUNCHER"
+          # GUI 子系统（2）才是对的：控制台版双击会闪一个黑框。
+          # windows 镜像的 Git Bash 里 python 可能是 python3，两个都试；
+          # 都没有就降级成警告 —— 守卫的核心是「文件在不在」，别因工具缺失假失败。
+          PYBIN="$(command -v python3 || command -v python || true)"
+          if [ -z "$PYBIN" ]; then
+            echo "::warning::未找到 python，跳过启动器的 PE 头检查"
+            exit 0
+          fi
+          "$PYBIN" - "$LAUNCHER" <<'EOF'
+          import struct, sys
+          d = open(sys.argv[1], 'rb').read()
+          pe = struct.unpack_from('<I', d, 0x3c)[0]
+          machine = struct.unpack_from('<H', d, pe + 4)[0]
+          subsystem = struct.unpack_from('<H', d, pe + 24 + 68)[0]
+          print(f"machine=0x{machine:04X} subsystem={subsystem} size={len(d)}")
+          if machine != 0x8664 or subsystem != 2:
+              sys.exit("启动器不是 amd64 GUI 子系统")
+          EOF
+
+      # 诊断探针：不依赖业务代码与 CGO（spec FR-011）。交付批次里带着它，
+      # 客户机上只要双击一次就能回答「这台机器到底能不能跑我们的程序」。
+      - name: Build diagnostic probe
+        shell: bash
+        env:
+          CGO_ENABLED: "0"
+        run: |
+          set -euo pipefail
+          mkdir -p out/diagnostic
+          GOOS=windows GOARCH=amd64 go build -ldflags "-s -w" \
+            -o "out/diagnostic/国研智研体-诊断.exe" ./cmd/windiag
+          ls -lh out/diagnostic
+
       - name: Collect artifacts
         shell: bash
         run: |
@@ -173,6 +237,45 @@ jobs:
           cp -v cmd/desktop/build/bin/*.exe out/ 2>/dev/null || true
           cp -v cmd/desktop/build/bin/*Setup.exe out/ 2>/dev/null || true
           ls -lh out
+
+      # 白名单四要素（安装目录 / 入口文件名 / SHA-256 / 版本）必须随包给出，
+      # 且升级后口径稳定，客户 IT 才能照着报白（spec FR-012）。
+      # manifest.json 同时把「这个包是哪次提交、什么时候构建的」钉死 ——
+      # 现场包无法追溯到源码状态，是最难查的一类问题。
+      - name: Checksums and manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          VERSION="$(cat VERSION)"
+          {
+            echo "{"
+            echo "  \"product\": \"国研智研体\","
+            echo "  \"version\": \"$VERSION\","
+            echo "  \"commit\": \"$GITHUB_SHA\","
+            echo "  \"ref\": \"$GITHUB_REF_NAME\","
+            echo "  \"builtAt\": \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\","
+            echo "  \"installer\": {"
+            echo "    \"installDir\": \"%PROGRAMFILES64%\\\\国研智研体\","
+            echo "    \"entry\": \"国研智研体-启动器.exe\","
+            echo "    \"app\": \"国研智研体.exe\""
+            echo "  },"
+            echo "  \"files\": ["
+            first=1
+            for f in out/*.exe out/diagnostic/*.exe; do
+              [ -f "$f" ] || continue
+              h="$(sha256sum "$f" | cut -d' ' -f1)"
+              sz="$(stat -c%s "$f")"
+              [ "$first" -eq 1 ] || echo ","
+              first=0
+              printf '    {"name": "%s", "sha256": "%s", "size": %s}' "$(basename "$f")" "$h" "$sz"
+            done
+            echo ""
+            echo "  ]"
+            echo "}"
+          } > out/manifest.json
+          ( cd out && sha256sum *.exe diagnostic/*.exe > SHA256SUMS.txt )
+          echo "--- manifest.json ---"
+          cat out/manifest.json
 
       - uses: actions/upload-artifact@v7
         with:
