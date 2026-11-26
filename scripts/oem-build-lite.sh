@@ -296,7 +296,7 @@ fi
 # 控制台版会把 panic/错误直接打印出来，是排查这类问题的第一手证据。
 # 诊断开关也可以由仓库内的标记文件触发：CI 的 workflow 不便频繁改动，
 # 需要一份「带控制台」的排错版本时，提交 scripts/.win-console 即可。
-if [[ "${TARGET_PLATFORM}" == windows* && -f "scripts/.win-console" ]]; then
+if [[ "${TARGET_PLATFORM}" == windows* && -f "scripts/win-console.flag" ]]; then
   WIN_CONSOLE=1
 fi
 
