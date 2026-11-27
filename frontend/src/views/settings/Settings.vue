@@ -364,11 +364,20 @@ const canSeeSection = (key: string): boolean => {
   return authStore.hasRole(min)
 }
 
-// OEM 设置页分区白名单（v2.8 收敛）。
+// OEM 设置页分区白名单（v2.8 收敛，v3.22 再收一次）。
 //
 // 交付形态只面向两类事：配置对话能力（模型 / 联网搜索 / 检索与解析 / 存储），
-// 以及本机授权与版本。窗口栏里的「系统设置」(system-global) 按交付要求隐藏，
-// 需要放开内网模型服务时把 'system-global' 加回来即可。
+// 以及本机授权与版本。
+//
+// 「系统设置」(system-global) 已按交付要求隐藏：它是平台级开关（用户管理、
+// SSRF 白名单、docker 开关、对话最大回答长度），单机单租户形态下两件事都
+// 用不上——没有账号体系，docker 后端在 lite 里被禁用，内网模型服务改由
+// 启动脚本的 SSRF_WHITELIST 环境变量控制。留在菜单里只会让人点进去看到
+// 一堆与自己无关的开关。
+//
+// 需要恢复该页时：把 'system-global' 加回下面的集合即可（侧栏分组、权限、
+// 后端路由都还在，只是入口被白名单挡住；直接手输 ?section=system-global
+// 也会被同一个白名单挡回去）。
 const OEM_SETTINGS_SECTIONS = new Set([
   'models',
   'websearch',
@@ -377,10 +386,6 @@ const OEM_SETTINGS_SECTIONS = new Set([
   'storage',
   // 关于：授权状态、本机标识、软件版本与续期入口合并成一页。
   'about',
-  // 系统设置（全局）：SSRF 白名单、对话最大回答长度等。内网模型服务
-  // （如 http://192.168.x.x:8005/v1）被 SSRF 防护拦截时，需要在这里
-  // 把主机加入白名单，否则只能在服务端环境变量里配置。
-  'system-global',
 ])
 
 const navItems = computed(() => {
@@ -451,8 +456,9 @@ const navGroups = computed<NavGroup[]>(() => {
     {
       key: 'platform',
       label: t('settings.navGroups.platform'),
-      // v2.9：授权与版本合并成「关于」；system-global 提供 SSRF 白名单等
-      // 内网模型服务所需的运行时配置。
+      // v2.9：授权与版本合并成「关于」。v3.22 起「系统设置」(system-global)
+      // 已从白名单移除，这里保留 key 只为将来放开时不必改分组定义——
+      // pickItems 取不到就会自动过滤掉。
       items: pickItems(['about', 'system-global']),
     },
   ].filter((group) => group.items.length > 0)

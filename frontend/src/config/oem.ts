@@ -214,15 +214,9 @@ export const OEM_MENU_TITLES: Record<string, string> = {
   settings: '系统设置',
 }
 
-/**
- * 系统设置页只保留这些 Tab（对应「模型管理」菜单）。
- * 其余 Tab（用户、安全、租户、审计等）在单租户简化模式下隐藏。
- */
-export const OEM_SETTINGS_ALLOWED_TABS: string[] = [
-  'models',
-  'model-settings',
-  'modelCredentials',
-]
+// 这里曾有一份 OEM_SETTINGS_ALLOWED_TABS（'models'/'model-settings'/'modelCredentials'），
+// 全仓库从未引用、key 也对不上真实分区；真正的设置页白名单在
+// frontend/src/views/settings/Settings.vue 的 OEM_SETTINGS_SECTIONS 里，已于 v3.22 删除以免误导。
 
 /**
  * 沙箱面板允许的 Tab。
