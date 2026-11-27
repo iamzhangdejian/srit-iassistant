@@ -87,6 +87,8 @@ miniprogram/project.private.config.json
 /cmd/desktop/build/AppDir/
 /cmd/desktop/build/dmg_staging/
 /cmd/desktop/build/windows_staging/
+/cmd/licadmin/build/
+# 发码端打包产物（.app / zip / 图标），由 scripts/package-licadmin.sh 生成，不入库
 /frontend/pnpm-lock.yaml
 
 # 授权公钥（公开材料，随源码交付，供各平台打包脚本嵌入）
