@@ -41,12 +41,16 @@ fi
 # ── 1. 校验系统依赖 ────────────────────────────────────────────────────
 echo "→ 校验 Linux 运行时依赖"
 missing=0
-for lib in libwebkit2gtk-4.1.so.0 libgtk-3.so.0; do
-  if ! ldconfig -p 2>/dev/null | grep -q "$lib"; then
-    echo "⚠ 缺失 $lib —— 目标机也必须有，否则无法启动"
-    missing=1
-  fi
-done
+# WebView 后端有两代：4.1（Ubuntu 22.04+）与 4.0（麒麟 V10 / UOS / Debian 11）。
+# 只要求「有一代」，具体哪一代由构建时的 -tags 决定（见 oem-build-lite.sh 的探测）。
+if ! ldconfig -p 2>/dev/null | grep -qE 'libwebkit2gtk-4\.(1\.so\.0|0\.so\.37)'; then
+  echo "⚠ 缺失 libwebkit2gtk（4.0 或 4.1 都没有）—— 目标机也必须有，否则无法启动"
+  missing=1
+fi
+if ! ldconfig -p 2>/dev/null | grep -q 'libgtk-3.so.0'; then
+  echo "⚠ 缺失 libgtk-3.so.0 —— 目标机也必须有，否则无法启动"
+  missing=1
+fi
 [ "$missing" = "1" ] && echo "  本机缺失不影响打包，但请写进使用说明"
 
 # ── 2. 准备 AppDir ─────────────────────────────────────────────────────
@@ -165,10 +169,17 @@ elif command -v appimagetool >/dev/null 2>&1; then
   echo "→ 使用 appimagetool 生成 AppImage"
   ARCH="$(uname -m)" appimagetool "$AppDir" "$OUT"
 else
+  # 没有 linuxdeploy/appimagetool 时不要停在「已生成 AppDir」——那是个需要手动拼的命令。
+  # 直接出 tar.gz：解压即用、不依赖 FUSE2，麒麟/UOS 上比 AppImage 更稳
+  # （这些发行版常缺 libfuse2，双击 AppImage 会报 "fuse: failed to exec fusermount"）。
+  ARCH_TAG="$(uname -m)"
+  TARBALL="cmd/desktop/build/bin/${APP_NAME}-${VERSION}-linux-${ARCH_TAG}.tar.gz"
+  tar -C cmd/desktop/build -czf "$TARBALL" AppDir
   echo "⚠ 未检测到 linuxdeploy 或 appimagetool"
-  echo "   安装方式："
-  echo "     curl -sL https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-x86_64.AppImage -o linuxdeploy && chmod +x linuxdeploy && sudo mv linuxdeploy /usr/local/bin/"
-  echo "   已生成 AppDir，可手动打包：$AppDir"
+  echo "   安装方式（${ARCH_TAG} 版）："
+  echo "     curl -sL https://github.com/linuxdeploy/linuxdeploy/releases/download/continuous/linuxdeploy-${ARCH_TAG}.AppImage -o linuxdeploy && chmod +x linuxdeploy && sudo mv linuxdeploy /usr/local/bin/"
+  echo "✓ 已改为产出 tar.gz：$TARBALL"
+  echo "  用法：解压后执行 ./AppDir/AppRun；资源根由 AppRun 通过 WEKNORA_RESOURCE_ROOT 导出"
   exit 0
 fi
 

@@ -106,6 +106,25 @@ case "${GOOS_TARGET}/${GOARCH_TARGET}" in
   *)             RUST_TARGET="";                       ANYDOC_DIR="" ;;
 esac
 
+# Linux 的 WebView 后端有两代，选错就是链接期直接报错：
+#   4.1 —— Ubuntu 22.04+/Debian 12+ 只提供它，必须加 webkit2_41（Wails 默认按 4.0 编）
+#   4.0 —— 麒麟 V10 / 统信 UOS / Debian 11 这类较老底座只有它，用 Wails 默认即可
+# 之前脚本里没有任何探测，走到 Linux 上要么缺 4.0 报错、要么在 4.1 的机器上编不过。
+if [[ "${GOOS_TARGET}" == linux ]]; then
+  if command -v pkg-config >/dev/null 2>&1 && pkg-config --exists webkit2gtk-4.1 2>/dev/null; then
+    BUILD_TAGS="${BUILD_TAGS} webkit2_41"
+    echo "→ WebView 后端：webkit2gtk-4.1（-tags webkit2_41）"
+  elif command -v pkg-config >/dev/null 2>&1 && pkg-config --exists webkit2gtk-4.0 2>/dev/null; then
+    echo "→ WebView 后端：webkit2gtk-4.0（Wails 默认 API）"
+  else
+    echo "✗ 找不到 webkit2gtk 开发包（pkg-config 也查不到）" >&2
+    echo "  Ubuntu/Debian : sudo apt install libwebkit2gtk-4.1-dev libgtk-3-dev" >&2
+    echo "  麒麟 V10/UOS  : sudo apt install libwebkit2gtk-4.0-dev libgtk-3-dev" >&2
+    echo "  只装运行时库不够，编译需要的是 -dev 包（含 .pc 与头文件）" >&2
+    exit 1
+  fi
+fi
+
 if [[ "${GOOS_TARGET}" == windows ]]; then
   if [[ "${GOARCH_TARGET}" != amd64 ]]; then
     echo "✗ 目前只支持 TARGET=windows/amd64（其它架构的 anydoc 预编译库不存在）" >&2
