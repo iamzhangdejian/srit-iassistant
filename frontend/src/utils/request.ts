@@ -2,7 +2,7 @@
 import axios from "axios";
 import { generateRandomString, MAX_FILE_SIZE_MB, MAX_SKILL_BUNDLE_SIZE_MB } from "./index";
 import i18n from '@/i18n'
-import { getApiBaseUrl } from './api-base';
+import { getApiBaseUrl, getApiTransportBase } from './api-base';
 import { isSkillBundleUploadUrl } from './uploadLimit';
 import { isTimeoutError, uploadTimeoutMs } from './requestTimeouts';
 import {
@@ -71,6 +71,9 @@ export function getCurrentLanguage(): string {
 
 instance.interceptors.request.use(
   (config) => {
+    // 桌面端：请求直连本机 HTTP。Wails 的 wails:// 自定义协议在 WebKit 2.38
+    // 上没有请求体支持（POST 体为空），必须绕开它才能提交授权码、上传文件等。
+    config.baseURL = getApiTransportBase();
     const existingAuth = config.headers?.Authorization ?? config.headers?.authorization;
     const isEmbedAuth = typeof existingAuth === 'string' && existingAuth.startsWith('Embed ');
     const isEmbedPath = typeof config.url === 'string' && config.url.includes('/api/v1/embed/');

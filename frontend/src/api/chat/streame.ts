@@ -2,7 +2,7 @@ import { fetchEventSource } from '@microsoft/fetch-event-source';
 import { ref, onUnmounted } from 'vue';
 import { generateRandomString } from '@/utils/index';
 import i18n from '@/i18n';
-import { getApiBaseUrl } from '@/utils/api-base';
+import { getApiTransportBase } from '@/utils/api-base';
 import type { AssistantAccessLevel } from '@/api/assistant';
 export type { CollaborationStatus, CollaborationTaskStatus, CollaborationProgress,
   CollaborationStatusStreamEvent, ProgressStreamEvent, AgentStepRecord, ChatHistoryMessage } from './streamTypes';
@@ -81,7 +81,7 @@ export function useStream() {
     isLoading.value = true;
 
     // 获取API配置
-    const apiUrl = getApiBaseUrl();
+    const apiUrl = getApiTransportBase();
     
     const embedToken = params.embed_token;
     const token = embedToken || localStorage.getItem('weknora_token');

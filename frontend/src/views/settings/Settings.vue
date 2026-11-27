@@ -377,6 +377,10 @@ const OEM_SETTINGS_SECTIONS = new Set([
   'storage',
   // 关于：授权状态、本机标识、软件版本与续期入口合并成一页。
   'about',
+  // 系统设置（全局）：SSRF 白名单、对话最大回答长度等。内网模型服务
+  // （如 http://192.168.x.x:8005/v1）被 SSRF 防护拦截时，需要在这里
+  // 把主机加入白名单，否则只能在服务端环境变量里配置。
+  'system-global',
 ])
 
 const navItems = computed(() => {
@@ -447,10 +451,9 @@ const navGroups = computed<NavGroup[]>(() => {
     {
       key: 'platform',
       label: t('settings.navGroups.platform'),
-      // v2.9：授权与版本合并成「关于」，系统分组只剩这一项。
-      // 「系统设置」（system-global：SSRF 白名单、对话最大回答长度等）仍隐藏，
-      // 需要放开内网模型服务时把 'system-global' 加回 OEM_SETTINGS_SECTIONS。
-      items: pickItems(['about']),
+      // v2.9：授权与版本合并成「关于」；system-global 提供 SSRF 白名单等
+      // 内网模型服务所需的运行时配置。
+      items: pickItems(['about', 'system-global']),
     },
   ].filter((group) => group.items.length > 0)
 })

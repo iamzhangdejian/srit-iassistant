@@ -203,12 +203,15 @@ func NewRouter(params RouterParams) *gin.Engine {
 		AllowMethods: []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"},
 		AllowHeaders: []string{
 			"Origin", "Content-Type", "Accept", "Authorization", "X-API-Key", "X-Request-ID", "X-Tenant-ID",
-			"X-Embed-Session", "X-External-User-ID", "X-External-User-Token", "X-WeKnora-Desktop-Token",
+			"X-Embed-Session", "X-Embed-Visitor", "X-External-User-ID", "X-External-User-Token", "X-WeKnora-Desktop-Token",
+			// 桌面端 API 直连本机 HTTP（Wails WebKit 自定义协议无法携带请求体），
+			// 这些头会触发 CORS 预检，必须放行。
+			"Accept-Language", "Range",
 			// Streamable HTTP MCP clients running in a browser send these on
 			// the /mcp/:endpoint_id surface.
 			"MCP-Protocol-Version", "Mcp-Method", "Mcp-Name", "Mcp-Session-Id", "Last-Event-ID",
 		},
-		ExposeHeaders:    []string{"Content-Length", "Access-Control-Allow-Origin", "Mcp-Session-Id"},
+		ExposeHeaders:    []string{"Content-Length", "Content-Range", "Accept-Ranges", "Access-Control-Allow-Origin", "Mcp-Session-Id"},
 		AllowCredentials: true,
 		MaxAge:           12 * time.Hour,
 	}))

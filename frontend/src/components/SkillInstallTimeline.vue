@@ -75,7 +75,7 @@ import { fetchEventSource } from '@microsoft/fetch-event-source'
 import { useChatStreamHandler } from '@/composables/useChatStreamHandler'
 import { getMessageList } from '@/api/chat'
 import { configSkillTranscriptUrl, getConfigSkillGuidance, steerConfigSkill, reinstallConfigSkill, type SkillInstallGuidanceState } from '@/api/system'
-import { getApiBaseUrl } from '@/utils/api-base'
+import { getApiTransportBase } from '@/utils/api-base'
 import { generateRandomString } from '@/utils/index'
 import { makeSteerClientId } from '@/utils/steerId'
 import SandboxCommandProgress from './SandboxCommandProgress.vue'
@@ -232,7 +232,7 @@ function stop() {
 // reports whether it ever produced anything: a 404 means the event log has
 // expired and the durable history is the only remaining source.
 async function follow(run: number): Promise<boolean> {
-  const url = `${getApiBaseUrl()}${configSkillTranscriptUrl(props.configId, props.skillId)}`
+  const url = `${getApiTransportBase()}${configSkillTranscriptUrl(props.configId, props.skillId)}`
   const token = localStorage.getItem('weknora_token')
   const tenantId = localStorage.getItem('weknora_selected_tenant_id')
   const ac = new AbortController()

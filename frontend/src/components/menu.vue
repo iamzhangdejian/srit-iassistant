@@ -41,8 +41,8 @@
             </div>
         </div>
 
-        <!-- 展开时：Logo + 产品名 + 版本号 -->
-        <div class="logo_row" v-if="!uiStore.sidebarCollapsed">
+        <!-- 展开时：Logo + 产品名 + 版本号（macOS 保留；非 macOS 桌面端的系统窗口已展示图标与名称，隐藏本区） -->
+        <div class="logo_row" v-if="!uiStore.sidebarCollapsed && !hideSidebarBrand">
             <!--
               OEM 白标点位：Logo 与产品名。
               替换方式：把 frontend/public/oem/logo.svg（或 logo.png）换成客户素材即可，
@@ -83,7 +83,7 @@
             </div>
         </div>
         <!-- 折叠时：展开按钮 -->
-        <t-tooltip v-else :content="t('menu.expandSidebar')" placement="right">
+        <t-tooltip v-if="uiStore.sidebarCollapsed" :content="t('menu.expandSidebar')" placement="right">
             <div class="menu_item sidebar-toggle-item" @click="uiStore.toggleSidebar">
                 <div class="menu_item-box">
                     <div class="menu_icon">
@@ -1271,6 +1271,16 @@ const handleSessionMutation = (event: Event) => {
 // Logo 加载失败兜底：某些内网部署会拦掉 /oem/* 静态资源，
 // 这时不该留一块空白，直接退化成产品名文字。
 const logoFailed = ref(false);
+// 非 macOS 桌面端隐藏侧栏品牌区：系统窗口（标题栏）已经展示应用图标与名称，
+// 侧栏再重复一次显得冗余。macOS 的内嵌标题栏不显示图标/名称，必须保留本区。
+// 浏览器形态不隐藏（不是桌面壳，侧栏是唯一的品牌入口）。
+const hideSidebarBrand = (() => {
+  if (typeof navigator === 'undefined') return false;
+  const ua = navigator.userAgent || '';
+  const isDesktopShell = /wails\.io/i.test(ua) || !!(window as any).wails;
+  const isMac = /Macintosh|Mac OS X/i.test(ua);
+  return isDesktopShell && !isMac;
+})();
 // OEM：版本号角标。桌面版由 Go 侧 OnDomReady 注入 window.__WK_APP_VERSION__。
 //
 // 时序注意：Wails 的 OnDomReady 可能早于 Vue 组件 setup 完成，也可能晚到；

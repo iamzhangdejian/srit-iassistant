@@ -5,6 +5,7 @@ package main
 import (
 	"context"
 	"crypto/rand"
+	_ "embed"
 	"encoding/base64"
 	"fmt"
 	"net"
@@ -25,6 +26,7 @@ import (
 	"github.com/wailsapp/wails/v2/pkg/menu/keys"
 	"github.com/wailsapp/wails/v2/pkg/options"
 	"github.com/wailsapp/wails/v2/pkg/options/assetserver"
+	"github.com/wailsapp/wails/v2/pkg/options/linux"
 	"github.com/wailsapp/wails/v2/pkg/options/mac"
 
 	"github.com/Tencent/WeKnora/internal/config"
@@ -41,6 +43,9 @@ import (
 	wailsruntime "github.com/wailsapp/wails/v2/pkg/runtime"
 	"go.uber.org/dig"
 )
+
+//go:embed build/appicon.png
+var desktopIcon []byte
 
 // dragHandlerJS is injected into the webview on DomReady.
 // It bypasses Wails' built-in CSS-variable-based drag detection (which uses
@@ -472,77 +477,82 @@ func main() {
 	time.Sleep(500 * time.Millisecond)
 
 	// Create application with options
-	// macOS app menu
-	AppMenu := menu.NewMenu()
-	FileMenu := AppMenu.AddSubmenu("国研智研体")
-	FileMenu.AddText("About 国研智研体", keys.CmdOrCtrl("i"), func(_ *menu.CallbackData) {
-		if app.ctx == nil {
-			return
-		}
-		_, err := wailsruntime.MessageDialog(app.ctx, wailsruntime.MessageDialogOptions{
-			Type:          wailsruntime.InfoDialog,
-			Title:         "国研智研体",
-			Message:       fmt.Sprintf("国研智研体 — 桌面版\n\n企业知识库与智能问答一体化平台。\n\nVersion %s\n© 2026", desktopAboutVersion()),
-			Buttons:       []string{"OK"},
-			DefaultButton: "OK",
+	// 应用菜单只在 macOS 创建：Linux/Windows 下 Wails 会把菜单渲染成窗口内的
+	// 原生顶栏（应用名/View/Window），产品上不需要，直接不创建。
+	var appMenu *menu.Menu
+	if goruntime.GOOS == "darwin" {
+		AppMenu := menu.NewMenu()
+		FileMenu := AppMenu.AddSubmenu("国研智研体")
+		FileMenu.AddText("About 国研智研体", keys.CmdOrCtrl("i"), func(_ *menu.CallbackData) {
+			if app.ctx == nil {
+				return
+			}
+			_, err := wailsruntime.MessageDialog(app.ctx, wailsruntime.MessageDialogOptions{
+				Type:          wailsruntime.InfoDialog,
+				Title:         "国研智研体",
+				Message:       fmt.Sprintf("国研智研体 — 桌面版\n\n企业知识库与智能问答一体化平台。\n\nVersion %s\n© 2026", desktopAboutVersion()),
+				Buttons:       []string{"OK"},
+				DefaultButton: "OK",
+			})
+			if err != nil {
+				logger.Warnf(context.Background(), "About dialog: %v", err)
+			}
 		})
-		if err != nil {
-			logger.Warnf(context.Background(), "About dialog: %v", err)
-		}
-	})
-	FileMenu.AddText("Check for Updates...", nil, func(_ *menu.CallbackData) {
-		if app.ctx == nil {
-			return
-		}
-		checkUpdate(app.ctx, desktopAboutVersion(), true, false)
-	})
-	FileMenu.AddSeparator()
+		FileMenu.AddText("Check for Updates...", nil, func(_ *menu.CallbackData) {
+			if app.ctx == nil {
+				return
+			}
+			checkUpdate(app.ctx, desktopAboutVersion(), true, false)
+		})
+		FileMenu.AddSeparator()
 
-	// 退出：先让后端正常收尾（停监听、关库），再结束进程。
-	// 兜底看门狗 6 秒：正常收尾要等 drain / cleanup 预算，一旦某个环节卡住，
-	// 用户看到的就是「按了 ⌘Q 没反应」。宁可硬退，也不要假死。
-	quitApp := func(_ *menu.CallbackData) {
-		go func() {
-			time.AfterFunc(6*time.Second, func() { os.Exit(0) })
-			app.shutdown(context.Background())
-			os.Exit(0)
-		}()
+		// 退出：先让后端正常收尾（停监听、关库），再结束进程。
+		// 兜底看门狗 6 秒：正常收尾要等 drain / cleanup 预算，一旦某个环节卡住，
+		// 用户看到的就是「按了 ⌘Q 没反应」。宁可硬退，也不要假死。
+		quitApp := func(_ *menu.CallbackData) {
+			go func() {
+				time.AfterFunc(6*time.Second, func() { os.Exit(0) })
+				app.shutdown(context.Background())
+				os.Exit(0)
+			}()
+		}
+		FileMenu.AddText("Quit", keys.CmdOrCtrl("q"), quitApp)
+
+		AppMenu.Append(menu.EditMenu())
+
+		ViewMenu := AppMenu.AddSubmenu("View")
+		ViewMenu.AddText("Reload", keys.CmdOrCtrl("r"), func(_ *menu.CallbackData) {
+			if app.ctx != nil {
+				wailsruntime.EventsEmit(app.ctx, "app:reload")
+			}
+		})
+
+		// Window 菜单：⌘M / ⌘W 这类快捷键不是窗口自己处理的。macOS 的路径是
+		// NSApplication 收到按键 → 去 NSApp.mainMenu 里找 keyEquivalent 匹配的
+		// 条目 → 找到才把 action 发出去。Wails 默认只给 App 与 Edit 两段菜单，
+		// 少一段 Window，这两个键就一个 action 都匹配不到，表现成「死键」。
+		WindowMenu := AppMenu.AddSubmenu("Window")
+		WindowMenu.AddText("Minimize", keys.CmdOrCtrl("m"), func(_ *menu.CallbackData) {
+			if app.ctx != nil {
+				wailsruntime.WindowMinimise(app.ctx)
+			}
+		})
+		WindowMenu.AddText("Zoom", nil, func(_ *menu.CallbackData) {
+			if app.ctx == nil {
+				return
+			}
+			if wailsruntime.WindowIsMaximised(app.ctx) {
+				wailsruntime.WindowUnmaximise(app.ctx)
+				return
+			}
+			wailsruntime.WindowMaximise(app.ctx)
+		})
+		WindowMenu.AddSeparator()
+		// 关闭窗口：本应用单窗口、无托盘，窗口关掉后进程留在后台等于用户什么
+		// 也看不到，所以 ⌘W 与 ⌘Q 走同一条收尾路径，避免出现隐形僵尸进程。
+		WindowMenu.AddText("Close Window", keys.CmdOrCtrl("w"), quitApp)
+		appMenu = AppMenu
 	}
-	FileMenu.AddText("Quit", keys.CmdOrCtrl("q"), quitApp)
-
-	AppMenu.Append(menu.EditMenu())
-
-	ViewMenu := AppMenu.AddSubmenu("View")
-	ViewMenu.AddText("Reload", keys.CmdOrCtrl("r"), func(_ *menu.CallbackData) {
-		if app.ctx != nil {
-			wailsruntime.EventsEmit(app.ctx, "app:reload")
-		}
-	})
-
-	// Window 菜单：⌘M / ⌘W 这类快捷键不是窗口自己处理的。macOS 的路径是
-	// NSApplication 收到按键 → 去 NSApp.mainMenu 里找 keyEquivalent 匹配的
-	// 条目 → 找到才把 action 发出去。Wails 默认只给 App 与 Edit 两段菜单，
-	// 少一段 Window，这两个键就一个 action 都匹配不到，表现成「死键」。
-	WindowMenu := AppMenu.AddSubmenu("Window")
-	WindowMenu.AddText("Minimize", keys.CmdOrCtrl("m"), func(_ *menu.CallbackData) {
-		if app.ctx != nil {
-			wailsruntime.WindowMinimise(app.ctx)
-		}
-	})
-	WindowMenu.AddText("Zoom", nil, func(_ *menu.CallbackData) {
-		if app.ctx == nil {
-			return
-		}
-		if wailsruntime.WindowIsMaximised(app.ctx) {
-			wailsruntime.WindowUnmaximise(app.ctx)
-			return
-		}
-		wailsruntime.WindowMaximise(app.ctx)
-	})
-	WindowMenu.AddSeparator()
-	// 关闭窗口：本应用单窗口、无托盘，窗口关掉后进程留在后台等于用户什么
-	// 也看不到，所以 ⌘W 与 ⌘Q 走同一条收尾路径，避免出现隐形僵尸进程。
-	WindowMenu.AddText("Close Window", keys.CmdOrCtrl("w"), quitApp)
 
 	// Wait for the backend URL to be set
 	targetURL, _ := url.Parse(app.backendURL)
@@ -555,7 +565,7 @@ func main() {
 		Width:         1280,
 		Height:        800,
 		DisableResize: false,
-		Menu:          AppMenu,
+		Menu:          appMenu,
 		AssetServer: &assetserver.Options{
 			Handler: proxy,
 		},
@@ -588,6 +598,9 @@ func main() {
 			app,
 		},
 		BackgroundColour: &options.RGBA{R: 255, G: 255, B: 255, A: 255},
+		Linux: &linux.Options{
+			Icon: desktopIcon,
+		},
 		Mac: &mac.Options{
 			// OEM：回到内嵌标题栏（HiddenInset）。红黄绿按钮由系统绘制在窗口
 			// 左上角、浮在 webview 之上，因此侧栏顶部必须预留一块空白给它，

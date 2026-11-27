@@ -6,7 +6,7 @@ import {
 } from '@/api/system'
 import i18n from '@/i18n'
 import { generateRandomString } from '@/utils'
-import { getApiBaseUrl } from '@/utils/api-base'
+import { getApiTransportBase } from '@/utils/api-base'
 import {
   installRunFinished,
   liveInstallPercent,
@@ -86,7 +86,7 @@ export function useConfigSkillInstallProgress(options?: {
 
     const token = localStorage.getItem('weknora_token')
     const tenantId = localStorage.getItem('weknora_selected_tenant_id')
-    const url = `${getApiBaseUrl()}${configSkillInstallEventsUrl(configId, skillId)}`
+    const url = `${getApiTransportBase()}${configSkillInstallEventsUrl(configId, skillId)}`
 
     void fetchEventSource(url, {
       method: 'GET',
