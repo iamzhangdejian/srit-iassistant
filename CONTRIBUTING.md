@@ -12,7 +12,7 @@
 `main` 必须**随时可打包、可交付**。合进 `main` 之前至少要能通过：
 
 - `go build -tags "sqlite_fts5" ./cmd/server`
-- `cd frontend && ./node_modules/.bin/vue-tsc --noEmit`
+- `cd frontend && ./node_modules/.bin/vue-tsc --noEmit`（依赖未装时先 `npm ci`）
 - 对应改动的单测（授权相关：`go test ./internal/license/... ./internal/licenser/...`）
 
 `main` 受分支保护：禁止强推、禁止删除。历史一旦被冲掉，本地 reflog 只有 90 天可救。
@@ -50,7 +50,17 @@ type(scope): 一句话说清做了什么
 
 ## 2. 构建与打包
 
-### 2.1 前端必须先手工重建
+### 2.1 前端依赖与构建
+
+`frontend/node_modules` **不入库**，换机器或清理过磁盘后必须先装：
+
+```bash
+cd frontend && npm ci        # 用仓库跟踪的 package-lock.json 锁版本
+```
+
+（不要用 `pnpm install`：`frontend/pnpm-lock.yaml` 在 .gitignore 里，装了会比提交时的版本新。）
+
+### 2.2 前端必须先手工重建
 
 `wails build` 的日志是 `No Build command. Skipping.`，它**不会**帮你构建前端，只把现有 `frontend/dist` 拷进 app。改了任何 `.vue` / `.ts` 都必须：
 
@@ -58,7 +68,7 @@ type(scope): 一句话说清做了什么
 cd frontend && export PATH=../../tools/node24/bin:$PATH && ./node_modules/.bin/vite build
 ```
 
-### 2.2 三个构建入口
+### 2.3 三个构建入口
 
 | 目标 | 命令 | 产物 |
 |---|---|---|
@@ -72,7 +82,7 @@ cd frontend && export PATH=../../tools/node24/bin:$PATH && ./node_modules/.bin/v
 
 DMG 生成偶发失败（`OSStatus error 1`），脚本会自动回退为 zip，属已知行为，不影响交付。
 
-### 2.3 产物永不入库
+### 2.4 产物永不入库
 
 `dist_install/` 是本地产物区；`cmd/desktop/build/bin/`、`cmd/licadmin/build/`、`frontend/node_modules/`、
 `tools/`、`*.bundle` 均被 `.gitignore` 排除。`cmd/desktop/build/` 下的 `appicon.png`、`darwin/Info.plist`、

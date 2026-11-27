@@ -18,6 +18,7 @@
 - [ ] `git pull --ff-only` 已同步到 `origin/main` 最新
 - [ ] `git log --oneline -5` 确认本次交付包含的提交都在，没有混入无关提交
 - [ ] 后端能编译：`go build -tags "sqlite_fts5" ./cmd/server`
+- [ ] 前端依赖已就位（`frontend/node_modules` 存在；缺失则 `cd frontend && npm ci`）
 - [ ] 前端类型干净：`cd frontend && ./node_modules/.bin/vue-tsc --noEmit`
 - [ ] 相关单测通过（授权相关必跑）
       `go test ./internal/license/... ./internal/licenser/... ./internal/application/service/`
